@@ -1,0 +1,27 @@
+# 根级兜底忽略（各子项目自带 .gitignore，此处为双保险）
+# 红线：真实配置与运行数据绝不入库（详见根 AGENTS.md「核心不变量」）
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# 各项目真实配置（模板为 config.example.toml）
+*/config.toml
+
+# 运行数据（数据库/录像/凭据/签名密钥/状态）
+*/data/
+data/
+
+# 前端构建产物与依赖（换机 npm install && npm run build 重建）
+*/frontend/node_modules/
+*/frontend/dist/
+
+# 测试临时目录（tests 使用 tempfile，异常退出可能残留）
+tmp*/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

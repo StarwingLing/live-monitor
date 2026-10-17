@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 运行期产物（v2.2 起本项目为数据属主：live.db / recordings/ /
+# cookies.json / 签名密钥与凭据都在 data/，绝不入库、绝不被部署同步覆盖）
+data/
+
+# 测试临时目录（tests 使用 tempfile，异常退出可能残留）
+tmp*/
+
+# 含服务器信息的真实配置，不入库（模板见 config.example.toml）
+config.toml
+
+# v1.3.0 React 前端工程：源码入库，构建产物与依赖不入库
+# （换机恢复：frontend/ 下 npm install && npm run build 重建 dist）
+frontend/node_modules/
+frontend/dist/

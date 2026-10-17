@@ -1,0 +1,24 @@
+# Web 服务 systemd 单元
+# 安装：cp bili-monitor-web.service /etc/systemd/system/ && systemctl daemon-reload
+[Unit]
+Description=bili-monitor web (FastAPI, v2.2 纯监控数据面——capture 已迁 replay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/opt/bili-monitor
+# root_path 通过 config.toml 的 server.root_path 配置（部署时设为 /bili-monitor）
+ExecStart=/opt/bili-monitor/.venv/bin/uvicorn bili_monitor.web.app:app \
+    --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=10
+# 500M：web 进程本身 ~80M + 转码线程拉起的 ffmpeg（1080p→480p 单线程
+# x264 峰值 ~250-300M）。200M 会让 ffmpeg 撞 cgroup 上限被 OOM 杀死，
+# systemd 判定单元 oom-kill 快速重启再重试转码——2026-10-08 曾形成
+# 13 秒一轮、持续 13 小时的崩溃循环（重启 3000+ 次），见版本笔记 v1.4.0。
+MemoryMax=250M
+
+[Install]
+WantedBy=multi-user.target

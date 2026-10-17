@@ -1,0 +1,22 @@
+# NapCat(QQ 协议端)systemd 单元【草案】
+# 以官方 BootWay03 教程的 unit 为基准:
+#   https://napneko.github.io/guide/boot/Shell-Linux-SemiAuto
+# 安装后按 `which napcat` 实际路径核对 ExecStart(本文档占位为 /root/Napcat),
+# 并保留下面两行追加项:Restart 保活 + 内存限额(官方口径常态 50~100M,
+# 400M 预算为登录/收发高峰留余量)。
+# 上线:systemctl daemon-reload && systemctl enable --now napcat
+[Unit]
+Description=NapCat QQ Bot (OneBot 11 protocol side)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Napcat
+ExecStart=/root/Napcat/napcat   # TODO 部署时按官方教程与实际安装路径核对
+Restart=always
+RestartSec=10
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[project]
+name = "bili-monitor"
+version = "2.2.0"
+description = "B站直播数据监控（v2.2 纯监控数据面：查询分析 web + 房间账户管理；采集与录制管线已迁 replay 项目）"
+requires-python = ">=3.12"
+dependencies = [
+    # add_room 校验的 B站 HTTP API 匿名会话（web/bili_api.py）
+    "aiohttp>=3.9.5",
+    "fastapi>=0.141.1",
+    "jinja2>=3.1.6",
+    "uvicorn>=0.52.4",
+    "websockets>=17.2",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.12.0",
+    "pillow>=12.3.0",
+]

@@ -1,0 +1,22 @@
+# 采集服务 systemd 单元（replay capture 子包，v2.2 自 bili-monitor 迁入）
+# 安装：cp replay-capture.service /etc/systemd/system/ && systemctl daemon-reload
+#       && systemctl enable --now replay-capture
+# 同窗停用并移除旧单元：systemctl disable --now bili-monitor-capture
+[Unit]
+Description=replay capture (blivedm 采集 + 录制/切片执行, v2.2 自 bili-monitor 迁入)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/opt/replay
+ExecStart=/opt/replay/.venv/bin/python -m replay.capture.main
+Restart=always
+RestartSec=10
+# 沿用 bili-monitor-capture 的口径（v2.1 已 600M→800M）：整场录制 ffmpeg
+# 与轮换期「旧段拼接 + 新段录制」双 ffmpeg 并存的峰值
+MemoryMax=800M
+
+[Install]
+WantedBy=multi-user.target

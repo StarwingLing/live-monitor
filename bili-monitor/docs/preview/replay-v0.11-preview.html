@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>预览 · replay 页改版 v0.11 · 全程录制与手动切片</title>
+<!--
+  bili-monitor v0.11 replay 按钮页改版【静态预览稿】
+  ─────────────────────────────────────────────────────────────────
+  用途：v0.11「自动全程录制 + 手动切片」的 UI 视觉基准，供用户审阅。
+  说明：
+  · 视觉 token 与现网 replay 页 / style.css 完全一致（B站粉蓝金 + DIN 数字）；
+  · 数据全部为 mock（示例主播、10月4/5日场次），交互为演示实现
+    （播放/打点/切片/删除可点，真实数据接入在实施阶段完成）；
+  · 实施时按本稿结构改写 templates/replay.html，样式并入页内 <style>。
+-->
+<style>
+/* ===== 基础：与现网 replay 页一致（replay.html 页内样式 + style.css token） ===== */
+:root {
+  --pink:#fb7299; --accent:#e8447f; --rose:#d6336c; --accent-soft:#ffeaf2;
+  --blue:#00aeec; --blue-deep:#0284c7; --blue-soft:#eef4ff;
+  --gold:#d97706; --gold-deep:#b45309; --gold-soft:#fff4e0;
+  --green:#16a34a; --green-soft:#e8f7ee;
+  --red:#e5484d; --red-soft:#fef2f2;
+  --ink:#1c2333; --sub:#8a93a6; --faint:#a7b0c0;
+  --line:#e6eaf2; --line2:#dfe4ee; --card:#ffffff;
+  --num:"DIN Alternate","Bahnschrift","Segoe UI",system-ui,sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+  background:linear-gradient(160deg,#f7f8fc,#eef1f8);
+  color:var(--ink); font-size:14px;
+}
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+::selection { background:#ffd9e6; }
+button { font-family:inherit; }
+
+/* ===== 预览稿提示条（实施时删除） ===== */
+.pv-note {
+  max-width:760px; margin:14px auto -6px; padding:8px 14px;
+  border:1px dashed #c9d2e4; border-radius:10px; background:#fff;
+  font-size:12px; color:var(--sub);
+}
+.pv-note b { color:var(--rose); font-weight:600; }
+
+/* ===== 页面骨架（与现网一致） ===== */
+.rp-page { max-width:760px; margin:0 auto; padding:28px 20px 60px; }
+.rp-head { text-align:center; margin-bottom:30px; }
+.rp-head .t1 { font-size:20px; font-weight:600; color:var(--ink); }
+.rp-head .t2 { font-size:13px; color:var(--sub); margin-top:5px; }
+.rp-btn-wrap { display:flex; justify-content:center; margin:34px 0 10px; }
+.rp-big {
+  width:168px; height:168px; border-radius:50%; border:none;
+  background:var(--pink); color:#fff; font-size:20px; font-weight:700;
+  cursor:pointer; box-shadow:0 10px 30px rgba(251,114,153,.35);
+  transition:transform .12s, box-shadow .12s, background .2s; line-height:1.5;
+}
+.rp-big:hover:not(:disabled) { transform:translateY(-2px);
+  box-shadow:0 14px 36px rgba(251,114,153,.45); }
+.rp-big.rec { background:var(--red); box-shadow:0 10px 30px rgba(239,68,68,.35); }
+.rp-big.rec:hover:not(:disabled) { box-shadow:0 14px 36px rgba(239,68,68,.45); }
+.rp-big:disabled { background:#b6bdc9; cursor:not-allowed; box-shadow:none; }
+/* 自动录制进行中的禁用态保持红色（传达“正在录”），仅失去交互 */
+.rp-big.rec:disabled { background:var(--red); opacity:.95;
+  box-shadow:0 10px 30px rgba(239,68,68,.35); }
+.rp-big .sub { display:block; font-size:12.5px; font-weight:500;
+               opacity:.92; margin-top:6px; font-family:var(--num);
+               font-variant-numeric:tabular-nums; }
+.rp-tip { text-align:center; font-size:12.5px; color:#98a1b3;
+          min-height:18px; margin-bottom:26px; }
+
+/* ===== v0.11 新增：全程录制日期板块 ===== */
+.rp-sec-title { display:flex; align-items:baseline; gap:10px;
+  font-size:15px; font-weight:600; color:var(--ink); margin:26px 0 6px; }
+.rp-sec-title .hint { font-size:12px; font-weight:400; color:var(--faint); }
+
+/* 日期分组行：DIN 日期 + 周几 + 场次计数，右侧细线延伸 */
+.rp-date { display:flex; align-items:center; gap:12px; margin:20px 0 10px; }
+.rp-date .d { font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:16px; font-weight:700; color:var(--ink); white-space:nowrap; }
+.rp-date .d small { font-family:inherit; font-size:12px; font-weight:500;
+  color:var(--sub); margin-left:6px; }
+.rp-date .rule { flex:1; height:1px; background:var(--line); }
+.rp-date .n { font-size:12px; color:var(--faint); white-space:nowrap; }
+
+/* 成片卡片（沿用 rp-item 白卡语言） */
+.af-item { background:var(--card); border-radius:12px; padding:14px 16px;
+  margin-bottom:10px; box-shadow:0 2px 10px rgba(20,30,60,.05); }
+.af-item .row1 { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.af-item .time { font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:14px; font-weight:600; color:var(--ink); }
+.af-item .rp-title { font-size:14px; font-weight:600; color:var(--ink);
+  word-break:break-word; }
+.af-item .meta { font-size:12.5px; color:var(--sub); margin-top:6px;
+  font-variant-numeric:tabular-nums; }
+.af-item .ops { margin-left:auto; display:flex; gap:8px; }
+.af-item .ops a, .af-item .ops button {
+  font-size:12.5px; padding:5px 12px; border-radius:8px;
+  border:1px solid var(--line2); background:#fff; color:#4a5468;
+  cursor:pointer; text-decoration:none; transition:border-color .12s,color .12s; }
+.af-item .ops a:hover, .af-item .ops button:hover {
+  border-color:var(--pink); color:var(--pink); }
+.af-item .ops button:disabled { color:#b6bdc9; cursor:not-allowed;
+  border-color:var(--line); }
+.af-item .ops button.rp-del:hover { border-color:var(--red); color:var(--red); }
+
+/* 徽标（沿用现网胶囊，新增金=切片处理中、绿=切片完成） */
+.rp-badge { font-size:11px; padding:2px 8px; border-radius:999px;
+  background:var(--blue-soft); color:var(--blue-deep); white-space:nowrap; }
+.rp-badge.rec { background:var(--red-soft); color:var(--red); }
+.rp-badge.err { background:var(--red-soft); color:var(--red); }
+.rp-badge.cut { background:var(--gold-soft); color:var(--gold-deep); }
+.rp-badge.ok  { background:var(--green-soft); color:var(--green); }
+
+/* 展开的预览区（视频 + 打点切片条） */
+.af-preview { margin-top:12px; }
+.af-video { position:relative; width:100%; aspect-ratio:16/9; border-radius:10px;
+  background:#0d0f16; overflow:hidden; cursor:pointer; }
+.af-video .play { position:absolute; inset:0; display:flex;
+  align-items:center; justify-content:center; border:none; background:none;
+  cursor:pointer; }
+.af-video .play .tri { width:0; height:0; margin-left:8px;
+  border-left:34px solid rgba(255,255,255,.92);
+  border-top:21px solid transparent; border-bottom:21px solid transparent;
+  filter:drop-shadow(0 4px 14px rgba(0,0,0,.5)); }
+.af-video .bar { position:absolute; left:0; right:0; bottom:0; height:26px;
+  display:flex; align-items:center; gap:10px; padding:0 12px;
+  background:linear-gradient(transparent,rgba(0,0,0,.65)); }
+.af-video .bar .t { font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:11.5px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.8); }
+.af-video .bar .track { position:relative; flex:1; height:4px; border-radius:2px;
+  background:rgba(255,255,255,.28); cursor:pointer; }
+.af-video .bar .track .fill { position:absolute; left:0; top:0; bottom:0;
+  border-radius:2px; background:var(--pink); }
+.af-video .dm-tag { position:absolute; top:10px; right:10px; font-size:11px;
+  color:rgba(255,255,255,.75); background:rgba(0,0,0,.35); border-radius:999px;
+  padding:2px 10px; }
+
+/* —— 打点切片条：本稿的核心新组件 ——
+   结构：一行说明 + 起止点按钮/输入；下一条全程时长轨道，
+   粉色区间 = 已选片段，两枚时间码别在区间两端（DIN 数字）。 */
+.af-clipbar { margin-top:12px; border:1px solid var(--line);
+  border-radius:10px; padding:12px 14px; background:#fbfcfe; }
+.af-clipbar .cap { font-size:12px; font-weight:600; color:#4a5468;
+  margin-bottom:10px; }
+.af-clipbar .marks { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.mk-btn { display:inline-flex; align-items:center; gap:7px; font-size:12.5px;
+  padding:6px 12px; border-radius:8px; border:1px solid var(--line2);
+  background:#fff; color:#4a5468; cursor:pointer;
+  transition:border-color .12s,color .12s,background .12s; }
+.mk-btn:hover { border-color:var(--pink); color:var(--pink); }
+.mk-btn .dot { width:8px; height:8px; border-radius:50%; background:var(--pink); }
+.mk-btn.out .dot { border-radius:2px; }
+.mk-btn.set { background:var(--accent-soft); border-color:var(--pink);
+  color:var(--rose); }
+.mk-time { font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:13px; font-weight:600; color:var(--ink); border:1.5px solid var(--line2);
+  border-radius:8px; padding:5px 9px; width:86px; text-align:center;
+  outline:none; background:#fff; }
+.mk-time:focus { border-color:var(--pink); }
+.mk-time.set { border-color:var(--pink); color:var(--rose);
+  background:#fffafd; }
+.af-clipbar .len { font-size:12px; color:var(--sub);
+  font-variant-numeric:tabular-nums; }
+
+/* 全程时长轨道：底轨灰色，选段粉色渐变，两枚别针竖线标记起止
+   （容器高度 46px：上方容纳标签，下方留翻转标签的空间） */
+.af-range { position:relative; height:46px; margin-top:12px; }
+.af-range .rail { position:absolute; left:0; right:0; top:14px; height:6px;
+  border-radius:3px; background:#e3e7f0; }
+.af-range .sel { position:absolute; top:14px; height:6px; border-radius:3px;
+  background:linear-gradient(90deg,var(--pink),var(--accent)); min-width:2px; }
+.af-range .pin { position:absolute; top:8px; width:2px; height:18px;
+  border-radius:1px; background:var(--rose); }
+.af-range .pin i { position:absolute; bottom:22px; left:50%;
+  transform:translateX(-50%); font-style:normal; white-space:nowrap;
+  font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:11px; font-weight:700; color:var(--rose);
+  background:#fff; border:1px solid var(--accent-soft);
+  padding:1px 6px; border-radius:6px; }
+.af-range .pin.l i { left:0; transform:none; }
+.af-range .pin.r i { left:auto; right:0; transform:none; }
+/* 短选段碰撞规避：起止标签过近时终点标签翻到轨道下方，避免互相叠压
+   （左标签向右伸出、右标签向左伸出，重叠条件 = 别针距 < 两标签宽之和） */
+.af-range .pin.r i.flip { bottom:auto; top:26px; }
+.af-range .dur { position:absolute; right:0; bottom:-4px; font-size:11px;
+  color:var(--sub); font-family:var(--num); font-variant-numeric:tabular-nums; }
+
+/* 切片提交行：名字自动随起止点生成（用户改过则不再自动覆盖） */
+.af-submit { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.af-submit input[type=text] { flex:1; min-width:180px; border:1.5px solid var(--line2);
+  border-radius:8px; padding:7px 10px; font-size:13px; font-family:inherit;
+  outline:none; background:#fff; color:var(--ink); }
+.af-submit input[type=text]:focus { border-color:var(--pink); }
+.af-submit .go { font-size:12.5px; padding:7px 18px; border-radius:8px;
+  border:none; background:var(--pink); color:#fff; font-weight:600;
+  cursor:pointer; }
+.af-submit .go:hover { background:var(--accent); }
+.af-submit .go:disabled { background:#b6bdc9; cursor:not-allowed; }
+.af-clipbar .caveat { margin-top:9px; font-size:11.5px; color:#98a1b3; }
+
+/* 卡内切片列表：左侧粉色导轨强调“从属于这条成片” */
+.af-clips { margin-top:12px; border-top:1px dashed var(--line);
+  padding-top:10px; }
+.af-clips .cap { font-size:12px; font-weight:600; color:#4a5468; margin-bottom:8px; }
+.af-clip { position:relative; background:#f7f8fc; border-radius:8px;
+  padding:8px 12px 8px 14px; margin-bottom:8px; border-left:3px solid var(--pink); }
+.af-clip .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.af-clip .name { font-size:13px; font-weight:600; color:var(--ink);
+  word-break:break-word; }
+.af-clip .rng { font-family:var(--num); font-variant-numeric:tabular-nums;
+  font-size:12px; color:var(--sub); }
+.af-clip .sz { font-size:12px; color:var(--faint); min-width:86px;
+  font-variant-numeric:tabular-nums; }
+.af-clip .mini { margin-left:auto; display:flex; gap:6px; }
+.af-clip .mini button { font-size:11.5px; padding:2px 10px; border-radius:6px;
+  border:1px solid var(--line2); background:#fff; color:var(--sub);
+  cursor:pointer; }
+.af-clip .mini button:hover { color:var(--pink); border-color:var(--pink); }
+.af-clip .mini button.rp-del:hover { color:var(--red); border-color:var(--red); }
+.af-clip .by { font-size:11.5px; color:var(--faint); margin-top:4px; }
+.af-clip .by b { color:#8a93a6; font-weight:600; }
+.af-clip.proc { border-left-color:var(--gold); }
+.af-clip.fail { border-left-color:var(--red); }
+/* 处理中徽标轻微呼吸（prefers-reduced-motion 时静止） */
+@keyframes cutPulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+.rp-badge.cut.pulse { animation:cutPulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .rp-badge.cut.pulse { animation:none; }
+  .rp-big, .af-item .ops button, .mk-btn { transition:none; }
+}
+
+/* ===== 现有区块：已保存的录播（v0.11 不动，仅示意共存） ===== */
+.rp-list-title { font-size:15px; font-weight:600; color:var(--ink);
+  margin:34px 0 12px; }
+.rp-search { margin-bottom:12px; }
+.rp-search input { width:100%; border:1.5px solid var(--line2); border-radius:10px;
+  padding:9px 14px; font-size:13.5px; font-family:inherit; outline:none;
+  background:#fff; color:var(--ink); }
+.rp-search input:focus { border-color:var(--pink); }
+.rp-item { background:#fff; border-radius:12px; padding:14px 16px;
+  margin-bottom:10px; box-shadow:0 2px 10px rgba(20,30,60,.05); }
+.rp-item .row1 { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rp-item .time { font-size:14px; font-weight:600; color:var(--ink); }
+.rp-item .meta { font-size:12.5px; color:var(--sub); margin-top:6px; }
+.rp-item .ops { margin-left:auto; display:flex; gap:8px; }
+.rp-item .ops a, .rp-item .ops button { font-size:12.5px; padding:5px 12px;
+  border-radius:8px; border:1px solid var(--line2); background:#fff;
+  color:#4a5468; cursor:pointer; text-decoration:none; }
+.rp-item .ops a:hover, .rp-item .ops button:hover { border-color:var(--pink);
+  color:var(--pink); }
+
+/* ===== toast（沿用现网行为） ===== */
+#toast { position:fixed; left:50%; bottom:34px; transform:translateX(-50%);
+  background:rgba(28,35,51,.92); color:#fff; font-size:13px;
+  padding:9px 18px; border-radius:10px; display:none; z-index:99;
+  max-width:86vw; text-align:center; }
+
+/* ===== 窄屏适配：打点行/提交行换行后仍对齐 ===== */
+@media (max-width:560px) {
+  .af-clipbar .marks { gap:8px; }
+  .mk-time { width:78px; }
+  .af-range .pin i { font-size:10px; }
+  .af-item .ops { margin-left:0; width:100%; }
+}
+</style>
+</head>
+<body>
+
+<!-- 预览稿提示条（实施时删除） -->
+<div class="pv-note" style="margin-top:14px">
+  <b>v0.11 静态预览稿</b> · mock 数据、演示级交互（播放推进、打点、切片均可点）。
+  视觉与组件为实施基准；「已保存的录播」区块 v0.11 保持原样，此处仅示意共存。
+</div>
+
+<div class="rp-page">
+  <div class="rp-head">
+    <div class="t1">示例主播 · 直播回放</div>
+    <div class="t2">本房间已开启自动全程录制：开播自动开始，下播自动保存</div>
+  </div>
+
+  <!-- 大按钮：房间开着自动录时的形态（录制中 → 红色 + 实时时长/体积，禁用手动） -->
+  <div class="rp-btn-wrap">
+    <button class="rp-big rec" disabled
+            title="自动全程录制进行中，无需手动操作">自动录制中<span class="sub" id="liveSub">2:14:36 · 3.1 GB</span></button>
+  </div>
+  <div class="rp-tip">正在全程录制 · 下播后自动保存到下方「全程录制」板块</div>
+
+  <!-- ═══ v0.11 新增：全程录制（日期分组板块） ═══ -->
+  <div class="rp-sec-title">全程录制
+    <span class="hint">开播自动录制 · 下播自动保存 · 可打点切片</span>
+  </div>
+
+  <!-- 日期分组：今天（有一场进行中） -->
+  <div class="rp-date">
+    <span class="d">10月5日<small>周一 · 今天</small></span>
+    <span class="rule"></span><span class="n">1 场 · 进行中</span>
+  </div>
+
+  <div class="af-item">
+    <div class="row1">
+      <span class="time">21:03</span>
+      <span class="rp-badge rec">录制中</span>
+      <div class="ops">
+        <button disabled>预览</button>
+        <button disabled>下载</button>
+      </div>
+    </div>
+    <div class="meta" id="liveMeta">时长 2:14:36 · 3.1 GB · 1080P60 · 开播起自动录制</div>
+  </div>
+
+  <!-- 日期分组：昨天（已收尾成片，展开态 = 预览 + 打点切片 + 切片列表） -->
+  <div class="rp-date">
+    <span class="d">10月4日<small>周日</small></span>
+    <span class="rule"></span><span class="n">1 场 · 已保存</span>
+  </div>
+
+  <div class="af-item" id="af1">
+    <div class="row1">
+      <span class="time">20:47</span>
+      <span class="rp-title">周末歌回</span>
+      <span class="rp-badge">已保存</span>
+      <div class="ops">
+        <button id="tgl1" onclick="togglePreview('af1')">收起预览</button>
+        <a href="#" onclick="return false">下载</a>
+      </div>
+    </div>
+    <div class="meta">时长 5:23:41 · 7.2 GB · 1080P60 · 源于自动全程录制</div>
+
+    <!-- 展开的预览区（实施时为真实 <video> + v0.10 弹幕层；此处为 mock 播放器） -->
+    <div class="af-preview" id="pv-af1">
+      <div class="af-video" id="vid">
+        <span class="dm-tag">弹幕层 · 现有</span>
+        <button class="play" id="playBtn" aria-label="播放/暂停">
+          <span class="tri" id="tri"></span>
+        </button>
+        <div class="bar">
+          <span class="t" id="vt">00:21:15</span>
+          <span class="track" id="vtrack"><span class="fill" id="vfill"></span></span>
+          <span class="t">05:23:41</span>
+        </div>
+      </div>
+
+      <!-- 打点切片条（核心新组件） -->
+      <div class="af-clipbar">
+        <div class="cap">打点切片</div>
+        <div class="marks">
+          <button class="mk-btn" id="mkIn" onclick="markIn()"><span class="dot"></span>设为起点</button>
+          <input class="mk-time" id="inT" value="00:21:15" spellcheck="false"
+                 aria-label="起点时间" onchange="onMarkEdit()">
+          <button class="mk-btn out" id="mkOut" onclick="markOut()"><span class="dot"></span>设为终点</button>
+          <input class="mk-time" id="outT" value="00:48:30" spellcheck="false"
+                 aria-label="终点时间" onchange="onMarkEdit()">
+          <span class="len" id="segLen">段长 27:15</span>
+        </div>
+        <div class="af-range">
+          <span class="rail"></span>
+          <span class="sel" id="sel"></span>
+          <span class="pin l" id="pinL"><i id="pinLT">21:15</i></span>
+          <span class="pin r" id="pinR"><i id="pinRT">48:30</i></span>
+          <span class="dur">全程 5:23:41</span>
+        </div>
+        <div class="af-submit">
+          <input type="text" id="clipName" maxlength="60"
+                 placeholder="切片名字（默认按起止时间命名）">
+          <button class="go" id="goCut" onclick="doCut()">切片</button>
+        </div>
+        <div class="caveat">快切按视频关键帧对齐，实际起止点可能有 ±2 秒左右偏差</div>
+      </div>
+
+      <!-- 卡内切片列表（左导轨强调从属） -->
+      <div class="af-clips">
+        <div class="cap">切片（3）</div>
+        <div class="af-clip" id="c1">
+          <div class="row">
+            <span class="name">开场白</span>
+            <span class="rp-badge ok">完成</span>
+            <span class="rng">00:21:15 – 00:48:30</span>
+            <span class="sz">412 MB · 27:15</span>
+            <span class="mini">
+              <button onclick="toast('演示：预览切片')">预览</button>
+              <button onclick="toast('演示：下载切片')">下载</button>
+              <button onclick="toast('演示：重命名')">重命名</button>
+              <button class="rp-del" onclick="delClip('c1')">删除</button>
+            </span>
+          </div>
+          <div class="by">由 <b>阿夜</b> 切出 · 10-04 23:12</div>
+        </div>
+        <div class="af-clip proc" id="c2">
+          <div class="row">
+            <span class="name">01:02:10 – 01:09:44</span>
+            <span class="rp-badge cut pulse">切片中</span>
+            <span class="rng">01:02:10 – 01:09:44</span>
+            <span class="sz">— · 7:34</span>
+          </div>
+          <div class="by">由 <b>阿夜</b> 切出 · 10-05 00:41</div>
+        </div>
+        <div class="af-clip" id="c3">
+          <div class="row">
+            <span class="name">谢场</span>
+            <span class="rp-badge ok">完成</span>
+            <span class="rng">05:12:02 – 05:23:41</span>
+            <span class="sz">186 MB · 11:39</span>
+            <span class="mini">
+              <button onclick="toast('演示：预览切片')">预览</button>
+              <button onclick="toast('演示：下载切片')">下载</button>
+              <button onclick="toast('演示：重命名')">重命名</button>
+              <button class="rp-del" onclick="delClip('c3')">删除</button>
+            </span>
+          </div>
+          <div class="by">由 <b>管理员</b> 切出 · 10-05 02:06</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日期分组：更早（收起态示意列表密度） -->
+  <div class="rp-date">
+    <span class="d">10月3日<small>周五</small></span>
+    <span class="rule"></span><span class="n">2 场 · 已保存</span>
+  </div>
+
+  <div class="af-item">
+    <div class="row1">
+      <span class="time">14:02</span>
+      <span class="rp-title">下午杂谈</span>
+      <span class="rp-badge">已保存</span>
+      <div class="ops">
+        <button onclick="toast('演示：展开预览与打点（同上）')">预览</button>
+        <a href="#" onclick="return false">下载</a>
+      </div>
+    </div>
+    <div class="meta">时长 1:47:09 · 2.3 GB · 1080P60 · 切片 2</div>
+  </div>
+  <div class="af-item">
+    <div class="row1">
+      <span class="time">20:15</span>
+      <span class="rp-title">夜场游戏</span>
+      <span class="rp-badge">已保存</span>
+      <div class="ops">
+        <button onclick="toast('演示：展开预览与打点（同上）')">预览</button>
+        <a href="#" onclick="return false">下载</a>
+      </div>
+    </div>
+    <div class="meta">时长 3:31:52 · 4.6 GB · 1080P60 · 切片 5</div>
+  </div>
+
+  <!-- ═══ 现有区块：已保存的录播（v0.11 原样保留，仅示意共存） ═══ -->
+  <div class="rp-list-title">已保存的录播</div>
+  <div class="rp-search">
+    <input type="text" maxlength="60" placeholder="搜索录播名字或注释…">
+  </div>
+  <div class="rp-item">
+    <div class="row1">
+      <span class="time">10-03 21:40</span>
+      <span class="rp-title">手动录的一段</span>
+      <span class="rp-badge">已保存</span>
+      <div class="ops">
+        <button onclick="toast('演示')">预览</button>
+        <button onclick="toast('演示')">注释 (1)</button>
+      </div>
+    </div>
+    <div class="meta">时长 0:52:18 · 1.1 GB · 手动触发 · 1080P60</div>
+  </div>
+  <div class="rp-item">
+    <div class="row1">
+      <span class="time">09-28 22:05</span>
+      <span class="rp-badge err">已中断保存</span>
+      <div class="ops">
+        <button onclick="toast('演示')">预览</button>
+        <button onclick="toast('演示')">下载</button>
+      </div>
+    </div>
+    <div class="meta">时长 0:31:44 · 702 MB · 中断前已录部分</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ═══ 演示级交互（实施时由真实数据 + API 替换，此处仅为体验打点工作流） ═══ */
+const DUR = 19421;              // mock 成片全程 5:23:41（秒）
+let cur = 21 * 60 + 15;         // 播放头（秒），初始 00:21:15
+let mkInV = 21 * 60 + 15, mkOutV = 48 * 60 + 30;   // 起止点（秒）
+let playing = false, nameTouched = false;
+
+const $ = id => document.getElementById(id);
+function fmt(s) {               // 秒 → h:mm:ss / m:ss（DIN 表格数字由 CSS 保证）
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
+}
+function fmtShort(s) {          // 轨道别针上的短时间码（省前导零）
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : '' + m) + ':' + String(x).padStart(2, '0');
+}
+function toast(msg) {
+  const el = $('toast'); el.textContent = msg; el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 2400);
+}
+function parseT(v) {            // h:mm:ss / mm:ss / 秒数 → 秒；非法返回 null
+  v = String(v || '').trim();
+  if (/^\d+$/.test(v)) return +v;
+  const p = v.split(':').map(x => x.trim());
+  if (p.some(x => x === '' || isNaN(+x))) return null;
+  return p.length === 3 ? (+p[0]) * 3600 + (+p[1]) * 60 + (+p[2])
+       : p.length === 2 ? (+p[0]) * 60 + (+p[1]) : null;
+}
+
+/* —— mock 播放器：约 ×60 倍速推进（16ms 一跳，每跳 1 秒），点击进度条可跳，
+   用于体验“边看边打点”；实施时替换为真实 <video> 的 timeupdate —— */
+$('playBtn').addEventListener('click', () => { playing = !playing; });
+setInterval(() => {
+  if (!playing) return;
+  cur = Math.min(DUR, cur + 1);
+  renderPlayer();
+}, 16);
+function renderPlayer() {
+  $('vt').textContent = fmt(cur);
+  $('vfill').style.width = (cur / DUR * 100) + '%';
+}
+$('vtrack').addEventListener('click', e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  cur = Math.round((e.clientX - r.left) / r.width * DUR);
+  renderPlayer();
+});
+renderPlayer();
+
+/* —— 打点：按钮取播放头；输入框可手改；轨道/段长/默认名联动 —— */
+function markIn()  { mkInV  = Math.min(cur, DUR - 10); if (mkOutV - mkInV < 10) mkOutV = Math.min(DUR, mkInV + 10); syncMarks(); }
+function markOut() { mkOutV = Math.max(cur, 10);       if (mkOutV - mkInV < 10) mkInV  = Math.max(0,  mkOutV - 10); syncMarks(); }
+function onMarkEdit() {
+  const a = parseT($('inT').value), b = parseT($('outT').value);
+  if (a === null || b === null || a < 0 || b > DUR || b - a < 10) {
+    toast('时间格式：mm:ss 或 h:mm:ss，且段长至少 10 秒');
+    syncMarks(); return;
+  }
+  mkInV = a; mkOutV = b; syncMarks();
+}
+function syncMarks() {
+  $('inT').value = fmt(mkInV);  $('outT').value = fmt(mkOutV);
+  $('inT').classList.add('set'); $('outT').classList.add('set');
+  $('mkIn').classList.add('set'); $('mkOut').classList.add('set');
+  const L = mkInV / DUR * 100, R = mkOutV / DUR * 100;
+  const sel = $('sel');
+  sel.style.left = L + '%'; sel.style.width = (R - L) + '%';
+  $('pinL').style.left = L + '%'; $('pinR').style.left = R + '%';
+  $('pinLT').textContent = fmtShort(mkInV); $('pinRT').textContent = fmtShort(mkOutV);
+  // 碰撞规避：别针间距小于两枚标签宽度之和（各向锚点外伸出）时翻转终点标签
+  const w = sel.parentElement.getBoundingClientRect().width;
+  const dpx = (R - L) / 100 * w;
+  const wLab = $('pinLT').offsetWidth + $('pinRT').offsetWidth;
+  $('pinRT').classList.toggle('flip', dpx < wLab + 8);
+  $('segLen').textContent = '段长 ' + fmt(mkOutV - mkInV);
+  if (!nameTouched) $('clipName').placeholder = '默认名：' + fmtShort(mkInV) + ' – ' + fmtShort(mkOutV);
+}
+$('clipName').addEventListener('input', () => { nameTouched = true; });
+
+/* —— 切片（演示）：插入“切片中”行，2.5s 后翻“完成” —— */
+let clipSeq = 100;
+function doCut() {
+  const len = mkOutV - mkInV;
+  if (len < 10) { toast('段长至少 10 秒'); return; }
+  const name = $('clipName').value.trim() || (fmtShort(mkInV) + ' – ' + fmtShort(mkOutV));
+  const id = 'cx' + (++clipSeq);
+  const div = document.createElement('div');
+  div.className = 'af-clip proc'; div.id = id;
+  div.innerHTML =
+    `<div class="row"><span class="name">${esc(name)}</span>` +
+    `<span class="rp-badge cut pulse">切片中</span>` +
+    `<span class="rng">${fmt(mkInV)} – ${fmt(mkOutV)}</span>` +
+    `<span class="sz">— · ${fmt(len)}</span></div>` +
+    `<div class="by">由 <b>阿夜</b> 切出 · 刚刚</div>`;
+  document.querySelector('#pv-af1 .af-clips').appendChild(div);
+  bumpClipCount(1);
+  toast('已提交切片：' + name);
+  setTimeout(() => {
+    div.classList.remove('proc');
+    div.querySelector('.rp-badge').outerHTML =
+      '<span class="rp-badge ok">完成</span>';
+    const sz = Math.round(len / DUR * 7.2e9 / 1e6);
+    div.querySelector('.sz').textContent = `${sz} MB · ${fmt(len)}`;
+    const row = div.querySelector('.row');
+    const mini = document.createElement('span');
+    mini.className = 'mini';
+    mini.innerHTML = `<button onclick="toast('演示：预览切片')">预览</button>` +
+      `<button onclick="toast('演示：下载切片')">下载</button>` +
+      `<button onclick="toast('演示：重命名')">重命名</button>` +
+      `<button class="rp-del" onclick="delClip('${id}')">删除</button>`;
+    row.appendChild(mini);
+  }, 2500);
+}
+function bumpClipCount(d) {
+  const cap = document.querySelector('#pv-af1 .af-clips .cap');
+  const m = cap.textContent.match(/\d+/); if (m) cap.textContent = `切片（${+m[0] + d}）`;
+}
+function delClip(id) {
+  if (!confirm('确定删除这条切片吗？文件将一并删除，不可恢复。')) return;
+  document.getElementById(id).remove();
+  bumpClipCount(-1);
+  toast('演示：切片已删除');
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* —— 展开收起（演示单卡片） —— */
+function togglePreview(id) {
+  const pv = $('pv-' + id);
+  const on = pv.style.display !== 'none';
+  pv.style.display = on ? 'none' : '';
+  $('tgl1').textContent = on ? '预览' : '收起预览';
+}
+
+/* —— 今天进行中卡片：时长/体积实时跳动（演示“活着”） —— */
+let liveSec = 2 * 3600 + 14 * 60 + 36;
+setInterval(() => {
+  liveSec += 1;
+  const gb = 3.1 + liveSec * 1.05e9 / 3600 / 1e9 - (2 * 3600 + 14 * 60 + 36) * 1.05e9 / 3600 / 1e9;
+  $('liveSub').textContent = fmt(liveSec) + ' · ' + gb.toFixed(1) + ' GB';
+  $('liveMeta').textContent = `时长 ${fmt(liveSec)} · ${gb.toFixed(1)} GB · 1080P60 · 开播起自动录制`;
+}, 1000);
+
+syncMarks();
+</script>
+</body>
+</html>

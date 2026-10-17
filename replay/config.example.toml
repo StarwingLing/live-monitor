@@ -1,0 +1,83 @@
+# replay 项目配置模板：复制为 config.toml 后按环境修改。
+# v2.2 架构改版后本项目为「采集 + 录制/切片执行 + 转码上云管线 + 回放站」
+# 完整载体：live.db 与 recordings/ 归本项目 data/，[capture]/[recording]/
+# [oss]/[retention]/[tier] 五段为本项目自有（自 bili-monitor config 迁入）；
+# [bili] 段仅存跨站桥接项（SSO 密钥定位）。
+
+[server]
+listen_host = "127.0.0.1"   # 只监听回环，公网经 Nginx 反代（工作区 AGENTS.md 约定）
+listen_port = 8003          # 端口登记：8001=bili-monitor、8002=bus-manager、8003=replay
+# Nginx 子路径部署时的前缀（服务器上 /replay；本地开发留空）
+root_path = ""
+
+[bili]
+# bili-monitor 的 data 目录（v2.2 起仅用于定位其 web_secret.key 做 SSO 验签；
+# 数据库与录像已归本项目 data/）。留空 = 自动取同级项目 ../bili-monitor/data/
+data_dir = ""
+# bili-monitor 登录 Cookie 的签名密钥文件路径（SSO 桥接用：验签 bili_auth，
+# 管理员跳转自动续登）。留空 = data_dir/web_secret.key
+bili_secret_path = ""
+# bili-monitor 的会话 Cookie 名（一般不改）
+bili_cookie_name = "bili_auth"
+# 切片一键投稿（biliup-rs 子进程）：二进制与 cookies 为部署项
+biliup_bin = ""                              # 空 = 投稿功能未部署（禁用）
+biliup_cookies = "data/biliup-cookies.json"
+biliup_timeout_sec = 1800
+
+[capture]
+# 采集进程参数（replay-capture 服务消费；完整键表与默认值见 replay/config.py）
+poll_interval_sec = 120        # 房间开播状态轮询间隔（秒）
+snapshot_interval_sec = 60     # 人气快照落库间隔（秒）
+end_grace_sec = 600            # 下播宽限：短暂波动不拆场
+session_merge_gap_sec = 600    # 短间隔复播场次合并窗口
+flush_interval_sec = 1         # writer 批量落库间隔
+reload_interval_sec = 30       # 房间名单热加载周期
+cookie_keepalive_hours = 6     # cookie 保活周期（小时）
+cookie = ""                    # B站登录 Cookie 串（留空=匿名采集）
+admin_password = ""            # X-Admin-Token 旧通道口令（空=本地调试模式）
+emoticon_refresh_hours = 24    # 直播间表情表刷新周期（小时）
+
+[retention]
+danmaku_days = 90              # 弹幕明细保留期（0=永久）
+interaction_days = 90          # 互动明细保留期（0=永久）
+
+[oss]
+# 云端桶与上云/归档/留存参数（v2.1 云存储口径；AK 唯一此处维护）
+enabled = false
+endpoint = "oss-cn-hangzhou-internal.aliyuncs.com"   # 上传走内网（同地域免流量费）
+region = "cn-hangzhou"
+bucket = ""                    # 主桶（录播原片 10 天归档落点）
+clips_bucket = ""              # 全量热桶（所有视频处理完成落点；空=回落主桶）
+access_key_id = ""
+access_key_secret = ""
+url_expiry_sec = 7200          # 签名 URL 有效期（秒）
+full_keep_hours = 96           # 录播本地留存（代码默认兼容值；服务器配 0=零留存）
+restore_keep_hours = 24        # 回灌原片独立留存窗口（v2.2.1；restored_at 非空行按此评估，与上键互不干扰）
+clips_keep_hours = 120         # 切片本体留存（服务器配 0）
+clips_low_keep_hours = 720     # 切片低清预览留存（服务器配 0）
+rec_archive_after_days = 10    # 录播原片 mid 热窗口天数，到期归档主桶(IA)
+scan_interval_sec = 600        # 转码+上云管线扫描周期（秒）
+
+[recording]
+# 录制/切片/分段轮换参数（完整键表见 replay/config.py）
+enabled = true                 # 录制总开关（本地未装 ffmpeg 可置 false）
+full_qn = 200                  # 手动整场录制画质
+auto_full_qn = 150             # 自动全程录制画质
+auto_full_poll_sec = 30        # 自动全程对账间隔（秒）
+max_concurrent = 2             # 全局并发整场上限
+segment_sec = 10               # ffmpeg 分段时长（秒）
+# v2.2.3：full_retention_days / max_total_full_gb（保留期/总量水位自动删行）
+# 已随「无自动清理」留存定稿移除，不要再配置这两个键
+full_split_hours = 2           # v2.1：到点自动分段轮换（0=关）
+bridge_min = 10                # v2.1：桥接片单侧分钟数（0=关）
+min_clip_sec = 10              # 切片时长下限（API 校验）
+max_total_manual_clips_gb = 0.0   # 切片容量预警线（0=取消）
+emergency_free_gb = 5.0        # 磁盘紧急清理阈值（同时驱动压力快路径）
+standalone_clip_max_sec = 1800 # 独立片段归档时长界
+ffmpeg_path = "ffmpeg"         # 可执行路径（本地 Windows 可指向 tools/ffmpeg.exe）
+
+[tier]
+# 用户分层阈值（capture 每日维护重算与 writer 实时近似共用）
+window_days = 30
+core_gift_per_session_yuan = 10.0
+active_min_danmaku = 10

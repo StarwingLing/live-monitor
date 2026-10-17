@@ -1,0 +1,24 @@
+# Web 服务 systemd 单元（replay 回放站）
+# 安装：cp replay-web.service /etc/systemd/system/ && systemctl daemon-reload
+#       && systemctl enable --now replay-web
+[Unit]
+Description=replay web (FastAPI, B站直播录播回放站)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/opt/replay
+# root_path 通过 config.toml 的 server.root_path 配置（部署时设为 /replay）
+ExecStart=/opt/replay/.venv/bin/uvicorn replay.web.app:app \
+    --host 127.0.0.1 --port 8003
+Restart=always
+RestartSec=10
+# v2.2：转码+上云+归档+释放管线自 bili-monitor web 迁入本服务 lifespan
+#（daemon 线程 + ffmpeg 转码子进程计入本 cgroup，bili web 同期负载口径
+# 500M）；叠加投稿（biliup+ffmpeg 抽帧）与回灌下载，300M→800M
+MemoryMax=800M
+
+[Install]
+WantedBy=multi-user.target

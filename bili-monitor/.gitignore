@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 运行期产物
+data/
+*.log
+
+# 测试临时目录（tests 使用 tempfile 在项目根创建，异常退出可能残留）
+tmp*/
+
+# 含登录 cookie 与管理口令的真实配置，不入库（模板见 config.example.toml）
+config.toml
+
+# 部署凭据（Basic Auth / 管理口令明文记录），仅存本地
+deploy/credentials.txt
+
+# 布局参考图与实现截图（设计资料，非代码）
+web-example/
+
+# 用户自己的密码记录，绝不入库
+地址和密码.txt
+
+# v2.0.0 React 前端工程：源码入库，构建产物与依赖不入库
+# （换机恢复：frontend/ 下 npm install && npm run build 重建 dist）
+frontend/node_modules/
+frontend/dist/

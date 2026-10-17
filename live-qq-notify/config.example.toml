@@ -1,0 +1,18 @@
+# live-qq-notify 配置样例(复制为 config.toml 使用;config.toml 不入 git)
+# 注意:通知开关/群映射/文案/NapCat 地址与 token/QQ 小号等**业务配置
+# 存共享 live.db**(bili-monitor 页面管理,每轮热加载),本文件只管进程级参数。
+
+[db]
+# 共享数据库路径(相对路径按项目根解析)
+# 服务器部署:/opt/replay/data/live.db
+# 本地联调:../bili-monitor/data/live.db
+path = "data/live.db"
+
+[bilibili]
+# 状态接口基址(默认官方;测试仿直播页时覆盖,如 http://127.0.0.1:8004)
+api_base = "https://api.live.bilibili.com"
+
+[poll]
+interval = 15     # 轮询间隔(秒)
+timeout = 10      # 单请求超时(秒)
+backoff_rounds = 5  # B 站连续失败 N 轮后打 WARNING(失败轮沿用上轮状态)

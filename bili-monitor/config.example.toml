@@ -1,0 +1,30 @@
+# config.toml 模板：复制为 config.toml 后填写真实值
+# （config.toml 含登录凭据，已被 .gitignore 排除，不会提交到 git）
+#
+# v2.2 架构改版：capture 采集与录制/转码/上云管线已迁 replay 项目，
+# 本配置只剩监控 web 所需四段（[oss]/[recording]/[retention]/采集参数
+# 去 replay 侧 config.toml 改）。
+
+[server]
+listen_host = "127.0.0.1"
+listen_port = 8001
+# Nginx 反代前缀（本地开发留空；服务器部署设为 "/bili-monitor"）
+root_path = ""
+# 共享数据库路径覆盖（空 = 本项目 data/live.db）。
+# 服务器部署设 "/opt/replay/data/live.db"；本地联调设 "../replay/data/live.db"
+db_path = ""
+
+[capture]
+# 本站登录门与 X-Admin-Token 旧通道口令（留空=不校验，仅限本机调试）
+admin_password = ""
+
+[web]
+# replay 回放站跳转基址：总览页「录制」列链接前缀（服务器 /replay；
+# 本地开发 http://127.0.0.1:8003）
+replay_base = "/replay"
+
+[tier]
+# 用户分层统计窗口与阈值（详见数据分析页口径）
+window_days = 30
+core_gift_per_session_yuan = 10.0
+active_min_danmaku = 10

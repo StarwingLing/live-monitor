@@ -1,0 +1,18 @@
+# live-qq-notify 通知器 systemd 单元(部署到 /etc/systemd/system/)
+# 上线:systemctl daemon-reload && systemctl enable --now live-qq-notify
+# 注意:ExecStart 直接指 .venv 解释器(部署时先 uv sync),不套 uv run 壳。
+[Unit]
+Description=live-qq-notify (Bilibili live status -> QQ group notifier)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/live-qq-notify
+ExecStart=/opt/live-qq-notify/.venv/bin/python -m live_qq_notify.main
+Restart=always
+RestartSec=15
+MemoryMax=80M
+
+[Install]
+WantedBy=multi-user.target

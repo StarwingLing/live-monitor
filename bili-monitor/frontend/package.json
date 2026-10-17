@@ -1,0 +1,27 @@
+{
+  "name": "bili-monitor-frontend",
+  "private": true,
+  "version": "1.6.0",
+  "type": "module",
+  "description": "bili-monitor 监控站 React SPA（ThreeUI 适配，产物随 tar 部署、不入 git）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "echarts": "^6.1.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.3.0"
+  }
+}

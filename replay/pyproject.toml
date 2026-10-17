@@ -1,0 +1,30 @@
+[project]
+name = "replay"
+version = "2.2.4"
+description = "B站直播录播回放站（v2.2 兼采集与存储管线：capture 子包 + 转码上云 + 三角色登录 + 监控码导航 + 管理页）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "jinja2>=3.1.6",
+    "uvicorn>=0.30.0",
+    # v2.2 自 bili-monitor 迁入 capture 子包：blivedm 弹幕连接 + B站 HTTP
+    # API 会话（房间信息/拉流直链/表情表）与 OSS 管线所需的 aiohttp
+    "aiohttp>=3.9.5",
+    "blivedm",
+    # OSS 签名 URL 播放/下载（私有 bucket，本机释放后的通道）与删除联动
+    # + v2.2 迁入的上传/归档/回灌管线；与 bili-monitor 同款 SDK
+    "alibabacloud-oss-v2>=1.4.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.uv.sources]
+blivedm = { path = "vendor/blivedm-1.1.7-py3-none-any.whl" }
+
+[dependency-groups]
+dev = [
+    # fastapi.testclient 依赖 httpx
+    "httpx>=0.27.0",
+]
