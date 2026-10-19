@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>唱歌片段检测 · 校对台</title>
+<style>
+  /* 基础布局：深色护眼，等宽数字便于读时间戳 */
+  :root {
+    --bg: #0f172a; --card: #1e293b; --line: #334155;
+    --text: #e2e8f0; --dim: #94a3b8;
+    --sing: #22c55e; --music: #eab308; --speech: #64748b; --accent: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 22px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 18px 22px 60px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  /* 发起分析表单 */
+  #path-row { display: flex; gap: 8px; }
+  #path-input {
+    flex: 1; background: #0b1220; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+    font-size: 13px;
+  }
+  button {
+    background: var(--accent); color: #04121f; border: 0; border-radius: 6px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  /* 任务进度 */
+  #task-box { display: none; margin-top: 12px; }
+  #task-bar-track {
+    height: 8px; background: #0b1220; border-radius: 4px; overflow: hidden;
+  }
+  #task-bar { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  #task-stage { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  #task-stage.err { color: #f87171; }
+  /* 结果列表 */
+  .res-item {
+    display: flex; align-items: center; gap: 14px; padding: 10px 6px;
+    border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .res-item:hover { background: #26334a; }
+  .res-item:last-child { border-bottom: 0; }
+  .res-item .name { flex: 1; font-weight: 600; }
+  .res-item .meta { color: var(--dim); font-size: 12px; }
+  .badge { padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+  .badge.sing { background: rgba(34,197,94,.15); color: var(--sing); }
+  .badge.music { background: rgba(234,179,8,.15); color: var(--music); }
+  .empty { color: var(--dim); text-align: center; padding: 18px 0; }
+  /* 详情页 */
+  #view-detail { display: none; }
+  .detail-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .detail-head .file { font-size: 16px; font-weight: 700; }
+  .detail-head .meta { color: var(--dim); font-size: 12px; }
+  video {
+    width: 100%; max-height: 52vh; background: #000; border-radius: 8px;
+    margin: 12px 0 8px;
+  }
+  canvas#timeline {
+    width: 100%; height: 96px; background: #0b1220; border-radius: 6px;
+    cursor: crosshair; display: block; margin-bottom: 6px;
+  }
+  .tl-legend { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+  .tl-legend i {
+    display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin: 0 4px 0 12px; vertical-align: -1px;
+  }
+  /* 段落表 */
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.ts { font-family: Consolas, monospace; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #26334a; }
+  tbody tr.active { background: rgba(56,189,248,.18); }
+  .sec-title { display: flex; align-items: baseline; gap: 8px; margin: 18px 0 6px; }
+  .sec-title .cnt { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>唱歌片段检测 · 校对台</h1>
+  <span class="sub">song-detector v0.1.0 · 本地分析</span>
+</header>
+
+<!-- ============ 首页视图：发起分析 + 已分析列表 ============ -->
+<main id="view-home">
+  <div class="card">
+    <h2>分析新的视频 / 音频</h2>
+    <div id="path-row">
+      <input id="path-input" placeholder="输入本机媒体文件或目录的绝对路径，如 D:\录播\full_30\seg_001.mp4">
+      <button id="btn-start">开始分析</button>
+    </div>
+    <div id="task-box">
+      <div id="task-bar-track"><div id="task-bar"></div></div>
+      <div id="task-stage"></div>
+    </div>
+    <div class="hint">
+      支持 mp4 / flv / mkv / mov / ts / m4a / mp3 / wav / flac / ogg / opus / aac；
+      目录则批量分析其中全部媒体文件。首次分析需加载模型（约半分钟）。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>已分析文件</h2>
+    <div id="result-list"><div class="empty">加载中…</div></div>
+  </div>
+</main>
+
+<!-- ============ 详情视图：播放器 + 时间轴 + 段落表 ============ -->
+<main id="view-detail">
+  <button class="ghost" id="btn-back">← 返回列表</button>
+  <div class="detail-head" id="detail-head"></div>
+  <video id="player" controls preload="metadata"></video>
+  <canvas id="timeline" height="96"></canvas>
+  <div class="tl-legend">
+    逐帧置信度：<i style="background:var(--sing)"></i>唱歌
+    <i style="background:var(--music)"></i>音乐/伴奏
+    <i style="background:var(--speech)"></i>说话
+    （点击时间轴任意位置跳转；音频文件无画面属正常）
+  </div>
+  <div id="seg-sections"></div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { pollTimer: null, result: null, rid: null };
+
+/* ---------- 通用 ---------- */
+function fmtTs(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+               : `${m}:${String(s).padStart(2,"0")}`;
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+/* ---------- 首页：结果列表 ---------- */
+async function loadResults() {
+  try {
+    const items = await api("/api/results");
+    const box = $("result-list");
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">还没有分析结果。输入上方路径开始第一次分析。</div>';
+      return;
+    }
+    box.innerHTML = items.map((it) => `
+      <div class="res-item" data-id="${it.id}">
+        <span class="name">${escapeHtml(it.file)}</span>
+        <span class="badge sing">唱歌 ${it.singing_count}</span>
+        <span class="badge music">音乐 ${it.music_count}</span>
+        <span class="meta">${fmtTs(it.duration_sec)} · ${escapeHtml(it.analyzed_at)}</span>
+      </div>`).join("");
+    box.querySelectorAll(".res-item").forEach((el) =>
+      el.addEventListener("click", () => openDetail(el.dataset.id)));
+  } catch (e) {
+    $("result-list").innerHTML = `<div class="empty">读取失败：${e.message}</div>`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* ---------- 首页：发起分析任务 ---------- */
+async function startTask() {
+  const path = $("path-input").value.trim();
+  if (!path) { $("path-input").focus(); return; }
+  $("btn-start").disabled = true;
+  $("task-box").style.display = "block";
+  setTaskBar(0, "已提交…", false);
+  try {
+    const { task_id } = await api("/api/tasks", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ path }),
+    });
+    pollTask(task_id);
+  } catch (e) {
+    setTaskBar(0, `发起失败：${e.message}`, true);
+    $("btn-start").disabled = false;
+  }
+}
+
+function setTaskBar(frac, stageText, isErr) {
+  $("task-bar").style.width = `${Math.round(frac * 100)}%`;
+  const stage = $("task-stage");
+  stage.textContent = stageText;
+  stage.className = isErr ? "err" : "";
+}
+
+function pollTask(taskId) {
+  clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(async () => {
+    try {
+      const t = await api(`/api/tasks/${taskId}`);
+      if (t.status === "running") {
+        setTaskBar(t.progress, `${t.stage} · ${Math.round(t.progress * 100)}%`, false);
+      } else if (t.status === "done") {
+        clearInterval(state.pollTimer);
+        setTaskBar(1, `完成（${t.result_ids.length} 个文件${t.errors.length ? `，${t.errors.length} 个失败` : ""}）`, false);
+        $("btn-start").disabled = false;
+        await loadResults();
+        if (t.result_ids.length === 1) openDetail(t.result_ids[0]);  // 单文件直接进入详情
+      } else {
+        clearInterval(state.pollTimer);
+        setTaskBar(1, `失败：${t.error}`, true);
+        $("btn-start").disabled = false;
+      }
+    } catch (e) { /* 单次轮询失败忽略，下个周期重试 */ }
+  }, 800);
+}
+
+/* ---------- 详情视图 ---------- */
+async function openDetail(rid) {
+  try {
+    state.rid = rid;
+    state.result = await api(`/api/results/${rid}`);
+  } catch (e) {
+    alert(`读取结果失败：${e.message}`);
+    return;
+  }
+  const r = state.result;
+  $("view-home").style.display = "none";
+  $("view-detail").style.display = "block";
+  const src = r.source;
+  $("detail-head").innerHTML = `
+    <span class="file">${escapeHtml(src.file)}</span>
+    <span class="meta">时长 ${fmtTs(src.duration_sec)} · 分析于 ${escapeHtml(r.analyzed_at)}
+    · 唱歌 ${r.segments.singing.length} 段 · 音乐 ${r.segments.music.length} 段</span>`;
+  const player = $("player");
+  player.src = `/api/media/${encodeURIComponent(rid)}`;
+  player.currentTime = 0;
+  renderSegSections();
+  drawTimeline();
+  player.ontimeupdate = () => { highlightActive(); drawTimeline(); };
+  window.scrollTo(0, 0);
+}
+
+function closeDetail() {
+  $("view-detail").style.display = "none";
+  $("view-home").style.display = "block";
+  $("player").pause();
+  loadResults();
+}
+
+/* 段落表：行点击跳段播放，播放中高亮当前段 */
+function renderSegSections() {
+  const r = state.result;
+  const mk = (kind, title) => {
+    const segs = r.segments[kind];
+    if (!segs.length) {
+      return `<div class="sec-title">${title}<span class="cnt">0 段 · 未检出</span></div>`;
+    }
+    // 音乐主导模式的歌曲段带 vocal_density/mean_speech，加两列判读信息
+    const hasVocal = segs.some((s) => s.vocal_density !== undefined);
+    const head = hasVocal
+      ? "<th>#</th><th>起</th><th>止</th><th>时长</th><th>均分</th><th>尖峰</th><th>说话</th><th>峰值类</th>"
+      : "<th>#</th><th>起</th><th>止</th><th>时长</th><th>均分</th><th>峰值类</th>";
+    const rows = segs.map((s, i) => {
+      const vocal = hasVocal
+        ? `<td>${Math.round(s.vocal_density * 100)}%</td><td>${s.mean_speech.toFixed(2)}</td>`
+        : "";
+      return `
+      <tr data-kind="${kind}" data-start="${s.start}" data-end="${s.end}">
+        <td>${i + 1}</td>
+        <td class="ts">${s.start_ts}</td>
+        <td class="ts">${s.end_ts}</td>
+        <td class="ts">${s.duration_ts}</td>
+        <td>${s.mean_score.toFixed(2)}</td>${vocal}
+        <td>${escapeHtml(s.peak_class || "")}</td>
+      </tr>`;
+    }).join("");
+    return `
+      <div class="sec-title">${title}<span class="cnt">${segs.length} 段（点击行跳转播放）</span></div>
+      <table><thead><tr>${head}</tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  };
+  $("seg-sections").innerHTML =
+    mk("singing", "唱歌片段") + mk("music", "音乐/伴奏片段");
+  $("seg-sections").querySelectorAll("tbody tr").forEach((tr) =>
+    tr.addEventListener("click", () => {
+      const player = $("player");
+      player.currentTime = parseFloat(tr.dataset.start);
+      player.play();
+    }));
+}
+
+function highlightActive() {
+  const t = $("player").currentTime;
+  $("seg-sections").querySelectorAll("tbody tr").forEach((tr) => {
+    const on = t >= parseFloat(tr.dataset.start) && t <= parseFloat(tr.dataset.end);
+    tr.classList.toggle("active", on);
+  });
+}
+
+/* ---------- 时间轴（canvas 三通道逐帧置信度 + 播放头） ---------- */
+function drawTimeline() {
+  const r = state.result;
+  if (!r) return;
+  const canvas = $("timeline");
+  const cssW = canvas.clientWidth || 900;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = cssW * dpr; canvas.height = 96 * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssW, 96);
+
+  const duration = r.source.duration_sec || 1;
+  const fs = r.frame_scores;
+  const lanes = [
+    ["singing", "#22c55e", 4], ["music", "#eab308", 36], ["speech", "#64748b", 68],
+  ];
+  if (fs && fs.t && fs.t.length) {
+    // 逐帧柱状图：每帧一根宽度=帧步长的柱子，高度=置信度
+    const hop = (fs.t[1] - fs.t[0]) || 0.48;
+    const barW = Math.max((hop / duration) * cssW, 0.8);
+    for (const [key, color, yBase] of lanes) {
+      const arr = fs[key];
+      ctx.fillStyle = color;
+      for (let i = 0; i < arr.length; i++) {
+        const h = Math.round(arr[i] * 26);  // 三条泳道各占 26px 高
+        if (h > 0) ctx.fillRect((fs.t[i] / duration) * cssW, yBase + 26 - h, barW, h);
+      }
+    }
+  } else {
+    // 无逐帧分数（--no-frames 分析的文件）：只画段落色块
+    for (const [key, color, yBase] of lanes) {
+      ctx.fillStyle = color;
+      for (const s of r.segments[key]) {
+        ctx.fillRect((s.start / duration) * cssW, yBase + 2,
+          ((s.end - s.start) / duration) * cssW, 22);
+      }
+    }
+  }
+  // 泄道分隔线 + 播放头
+  ctx.strokeStyle = "rgba(148,163,184,.25)";
+  for (const y of [32, 64]) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cssW, y); ctx.stroke(); }
+  const px = ($("player").currentTime / duration) * cssW;
+  ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, 96); ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+/* 时间轴点击 → 跳转播放位置 */
+$("timeline").addEventListener("click", (ev) => {
+  const rect = ev.target.getBoundingClientRect();
+  const frac = (ev.clientX - rect.left) / rect.width;
+  const duration = state.result?.source?.duration_sec || 1;
+  $("player").currentTime = Math.max(0, Math.min(frac * duration, duration - 0.1));
+});
+
+/* ---------- 事件绑定与初始化 ---------- */
+$("btn-start").addEventListener("click", startTask);
+$("path-input").addEventListener("keydown", (e) => { if (e.key === "Enter") startTask(); });
+$("btn-back").addEventListener("click", closeDetail);
+window.addEventListener("resize", () => { if (state.rid) drawTimeline(); });
+loadResults();
+</script>
+</body>
+</html>

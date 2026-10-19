@@ -44,8 +44,10 @@ def make_client(mode: str, calls: list):
             if mode == "upload_fail":
                 return httpx.Response(200, json={
                     "code": 1, "message": "upload fail"})
+            # 真实接口 2026-10-17 实测形态(无 code 字段,含 ttl/raw_url)
             return httpx.Response(200, json={
-                "code": 0, "file_info": "FILE_INFO_X", "expires_in": "60"})
+                "file_uuid": "U1", "file_info": "FILE_INFO_X",
+                "ttl": "604800", "id": "F1", "raw_url": "https://r/x.jpg"})
         return httpx.Response(404, json={"code": -1, "message": "no route"})
 
     return httpx.Client(transport=httpx.MockTransport(handler))
@@ -85,15 +87,17 @@ try:
 except official.OfficialError as e:
     check("业务错抛 OfficialError(含错误码)", "40034100" in str(e))
 
-# 6. 封面两步:URL 直传(files 表单)→ msg_type=7 发图
+# 6. 封面两步:URL 直传(files,**JSON 体**——表单体实测会被接口回表单响应)
+#    → msg_type=7 发图
 calls.clear()
 oc4 = official.OfficialClient("123", "sec", client=make_client("ok", calls))
 oc4.send_group_media_url("OPENID2", "https://i0.hdslb.com/cover.jpg")
 upload = [c for c in calls if c[1].endswith("/files")]
 sendm = [c for c in calls if c[1].endswith("/messages")]
-check("封面上传:POST files 表单带 file_type=1 与原始 URL",
-      len(upload) == 1 and "file_type=1" in upload[0][2]
-      and "cover.jpg" in upload[0][2])
+check("封面上传:POST files JSON 体(file_type=1/url/srv_send_msg=False)",
+      len(upload) == 1 and json.loads(upload[0][2]) ==
+      {"file_type": 1, "url": "https://i0.hdslb.com/cover.jpg",
+       "srv_send_msg": False})
 check("封面发图:messages msg_type=7 + file_info",
       len(sendm) == 1 and json.loads(sendm[0][2]) ==
       {"msg_type": 7, "media": {"file_info": "FILE_INFO_X"}})
@@ -113,6 +117,10 @@ try:
     check("凭据错误 probe 抛 OfficialError", False)
 except official.OfficialError as e:
     check("凭据错误 probe 抛 OfficialError(含 100016)", "100016" in str(e))
+
+# (v0.3.0 曾有 multipart 本地文件直传用例;2026-10-18 服务器实测该通道被
+#  平台拒绝 40093007——群富媒体只收公网 URL,方法与用例均已删除,
+#  报告图改经 OSS 中转走 send_group_media_url,见 oss.py 与 test_oss.py)
 
 print("\n汇总:", "全部通过" if all(results) else f"{results.count(False)} 项失败")
 raise SystemExit(0 if all(results) else 1)

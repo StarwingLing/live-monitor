@@ -36,11 +36,27 @@ _DEFAULTS = {
         # 失败轮沿用上轮状态,不会误判下播)
         "backoff_rounds": 5,
     },
+    "oss": {
+        # 报告图 OSS 中转(v0.3.0 official 通道;群富媒体只收公网 URL,
+        # 见 oss.py 模块说明)。本地默认关;服务器 config.toml 配
+        # replay 同一份 AK,上传走内网 endpoint。
+        "enabled": False,
+        "region": "cn-hangzhou",
+        "bucket": "",
+        "access_key_id": "",
+        "access_key_secret": "",
+        "internal_upload": True,
+    },
 }
 
 
 def load_config() -> dict:
-    """读 config.toml 并与默认值合并(缺失整段/单键都回退)。"""
+    """读 config.toml 并与默认值合并(缺失整段/单键都回退)。
+
+    合并后应用可选的环境变量覆盖(LQN_DB_PATH / LQN_API_BASE /
+    LQN_POLL_INTERVAL)——仅供本地端到端联调把主进程指到临时库/仿直播页,
+    与 LQN_STATE_PATH 同思路;生产环境不设置即零影响。
+    """
     cfg: dict = {}
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as f:
@@ -48,6 +64,15 @@ def load_config() -> dict:
     merged = {}
     for section, defaults in _DEFAULTS.items():
         merged[section] = {**defaults, **cfg.get(section, {})}
+    env_db = os.environ.get("LQN_DB_PATH")
+    env_api = os.environ.get("LQN_API_BASE")
+    env_itv = os.environ.get("LQN_POLL_INTERVAL")
+    if env_db:
+        merged["db"]["path"] = env_db
+    if env_api:
+        merged["bilibili"]["api_base"] = env_api
+    if env_itv and env_itv.strip().isdigit():
+        merged["poll"]["interval"] = int(env_itv)
     return merged
 
 

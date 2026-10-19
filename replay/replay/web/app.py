@@ -54,6 +54,8 @@ from ..capture.recording import RECORDINGS_ROOT
 from . import pipeline as pipeline_mod
 from . import restore as restore_mod
 from . import upload as upload_mod
+from . import bili_api
+from . import submit_sync
 from .ass import build_ass
 
 cfg = get_config()
@@ -250,6 +252,7 @@ async def lifespan(_app: FastAPI):
         print(f"[replay] 警告：共享数据库不可用（{e}）——"
               "请检查 data/live.db 所在目录与权限")
     pipeline_mod.start()
+    submit_sync.start()     # v2.3.0 投稿记录长周期同步（核验+回填；未部署时不启动）
     yield
 
 
@@ -287,6 +290,9 @@ _ADMIN_PAGE_RE = re.compile(r"^/manage$")
 #                     同样精确放行（POST submit 属写方法，guest 仍被拦）
 _API_ROOM_RE = re.compile(r"^/api/rooms/(\d+)/(recordings|auto-recordings|oss-url)(/|$)")
 _API_CLIP_RE = re.compile(r"^/api/rooms/(\d+)/clips/\d+(/notes.*|/danmaku|/cover-preview|/submit(/\w+)?|/release-local)?$")
+# v2.3.0 投稿目标数据（账号合集 / 稿件列表）：账号级而非房间级——clipper
+# 放行（开投稿抽屉要用）、guest 一律 403（投稿账号信息不对游客暴露）
+_API_SUBMIT_RE = re.compile(r"^/api/submit(/|$)")
 # 房间绑定角色唯一可访问的视频文件前缀（自己房间的成片）
 _FILE_RE = re.compile(r"^/recordings/(\d+)/")
 
@@ -408,6 +414,12 @@ async def auth_gate_and_no_cache(request: Request, call_next):
         if p.startswith("/api"):
             if p == "/api/auth/me":
                 response = await call_next(request)   # 身份查询对所有会话开放
+            elif _API_SUBMIT_RE.match(p):
+                if role == "guest":
+                    # 游客只读也不放行：合集/稿件列表属投稿账号信息
+                    return respond(JSONResponse(
+                        {"detail": "游客无投稿权限"}, status_code=403))
+                response = await call_next(request)
             else:
                 m_api = _API_ROOM_RE.match(p) or _API_CLIP_RE.match(p)
                 if not (m_api and int(m_api.group(1)) == own):
@@ -1481,6 +1493,15 @@ async def auto_recordings(room_id: int):
              "file_size, duration_sec, source, oss_key, oss_low_key "
              "FROM recordings "
              "WHERE room_id = ? ORDER BY started_at DESC, id DESC", (room_id,))
+    # 投稿结果（v2.3.0 持久真源）：按 clip_id 一次查齐，随切片行回传
+    #（alive=0 的记录仍回传——前端可决定显示形态，当前口径隐藏胶囊）
+    subs: dict[int, dict] = {}
+    try:
+        for s in q("SELECT clip_id, bv, mode, title, submitted_at, "
+                   "season_note, alive FROM clip_submissions"):
+            subs[s.pop("clip_id")] = s
+    except sqlite3.OperationalError:
+        pass    # 老库缺表防御（init_db 启动即建，正常不走到）
     # 录制注释 / 切片注释一次查齐分组挂载
     notes_by_rec: dict[int, list[dict]] = {}
     for n in q("SELECT n.id, n.recording_id, n.author, n.content, "
@@ -1506,6 +1527,7 @@ async def auto_recordings(room_id: int):
         c["on_oss"] = bool(c["oss_key"])
         c["etype"] = "clip"
         c["notes"] = cnotes_by_clip.get(c["id"], [])
+        c["submission"] = subs.get(c["id"])
         clips_by_rec.setdefault(c.pop("recording_id"), []).append(c)
     # 孤儿切片：源录制行已被保留期/水位清理（切片自包含存续）
     orphans = q("SELECT c.id, c.recording_id, c.title, c.start_sec, c.end_sec, "
@@ -1523,6 +1545,7 @@ async def auto_recordings(room_id: int):
         c["on_oss"] = bool(c["oss_key"])
         c["etype"] = "clip"
         c["notes"] = cnotes_by_clip.get(c["id"], [])
+        c["submission"] = subs.get(c["id"])
 
     groups: dict[str, list[dict]] = {}
     for r in rows:
@@ -2008,16 +2031,23 @@ async def oss_url(room_id: int, request: Request, key: str,
 
 
 # ---------------------------------------------------------------------------
-# 切片一键投稿 B 站（v2.0.0：biliup-rs 子进程，详见 upload.py）
+# 切片一键投稿 B 站（v2.0.0：biliup-rs 子进程，详见 upload.py；
+# v2.3.0：新视频可加入合集、可追加为现有稿件分P；目标数据与账号管理见
+# bili_api.py 与下方 /api/submit/*、/api/admin/submit/* 端点）
 # ---------------------------------------------------------------------------
 class SubmitIn(BaseModel):
-    title: str = ""             # 空 = 用切片名兜底
+    mode: str = "new"           # new 新视频投稿 / part 追加为现有稿件分P
+    title: str = ""             # 空 = 用切片名兜底（仅 new 模式）
     desc: str = ""
     tags: str = ""              # 逗号分隔
     tid: int = 171
     source_type: str = "original"   # original 自制 / reprint 转载
     source_url: str = ""        # 转载必填
     cover_b64: str = ""         # 自定义封面（data URL / 裸 base64；空 = 抽帧）
+    season_id: int | None = None    # new：加入合集（None = 不加入）
+    section_id: int | None = None   # new：合集小节（多小节必选，默认第一节）
+    target_vid: str = ""        # part：目标稿件 av 号或 BV 号
+    part_title: str = ""        # part：分P名（= 上传文件名；空 = 用切片名）
 
 
 @app.post("/api/rooms/{room_id}/clips/{clip_id}/submit")
@@ -2030,51 +2060,429 @@ async def submit_clip(room_id: int, clip_id: int, body: SubmitIn,
         raise HTTPException(400, "当前会话未绑定昵称，请退出登录后重新进入")
     if not upload_mod.submit_enabled():
         raise HTTPException(503, "投稿功能未部署（biliup 二进制或 "
-                                "cookies.json 缺失，见 deploy/README）")
+                                "cookies.json 缺失，见管理页·账号管理）")
     clip = _load_clip(room_id, clip_id)
     if clip["status"] != "done" or not (clip["file_path"] or clip["oss_key"]):
         raise HTTPException(400, "切片尚未完成或没有可投的视频文件")
-    # 表单校验（B 站侧口径；违者 400 由前端即时提示）
-    title = (body.title or clip["title"] or "").strip() or \
-        f"切片 clip{clip_id}"
-    if len(title) > upload_mod.TITLE_MAX:
-        raise HTTPException(400, f"标题最长 {upload_mod.TITLE_MAX} 字")
-    if len(body.desc) > upload_mod.DESC_MAX:
-        raise HTTPException(400, f"简介最长 {upload_mod.DESC_MAX} 字")
-    tags = [t.strip() for t in body.tags.split(",") if t.strip()]
-    if len(tags) > upload_mod.TAG_MAX:
-        raise HTTPException(400, f"标签最多 {upload_mod.TAG_MAX} 个")
-    if any(len(t) > upload_mod.TAG_LEN_MAX for t in tags):
-        raise HTTPException(400, f"单个标签最长 {upload_mod.TAG_LEN_MAX} 字")
-    if body.source_type not in ("original", "reprint"):
-        raise HTTPException(400, "source_type 必须为 original / reprint")
-    if body.source_type == "reprint" and not body.source_url.strip():
-        raise HTTPException(400, "转载投稿必须填写来源地址")
-    if body.tid not in upload_mod.TIDS:
-        raise HTTPException(400, "投稿分区不在支持列表内")
+    if body.mode not in ("new", "part"):
+        raise HTTPException(400, "mode 必须为 new / part")
+    # v2.3.0 服务器实测修正：分P追加同样需要 access_token——biliup append
+    # 内部先查稿件（APP 接口），网页 cookie 缺 token 时返回 -400「请求错误」
+    # 而非可读提示。两模式统一守卫：凭据须为完整 biliup 登录态
+    if not bili_api.has_access_token():
+        raise HTTPException(503, "投稿需要完整 biliup 凭据（当前凭据缺 "
+                                "access_token；请在管理页·账号管理重新配置，"
+                                "粘贴浏览器 Cookie 会自动兑换完整登录）")
 
-    form = {"title": title, "desc": body.desc, "tags": ",".join(tags),
-            "tid": body.tid, "source_type": body.source_type,
-            "source_url": body.source_url.strip(),
-            "cover_b64": body.cover_b64}
-    job = upload_mod.create_job(room_id, clip_id, title)
+    if body.mode == "part":
+        # ---- 分P模式：只管目标稿件与分P名（原稿元数据不动）----
+        vid = body.target_vid.strip()
+        if not vid:
+            raise HTTPException(400, "追加分P必须选择目标稿件")
+        if not (vid.isdigit() or re.fullmatch(r"BV[0-9A-Za-z]{10}", vid)):
+            raise HTTPException(400, "目标稿件号须为 av 数字或 BV 号")
+        part_title = body.part_title.strip() or (clip["title"] or "").strip()
+        if not part_title:
+            raise HTTPException(400, "分P名为空（且切片无名可兜底）")
+        if len(part_title) > 80:
+            raise HTTPException(400, "分P名最长 80 字")
+        if not bili_api.sanitize_part_name(part_title):
+            raise HTTPException(400, "分P名清洗后无有效字符")
+        form = {"mode": "part", "target_vid": vid, "part_title": part_title}
+        # v2.3.0 本地投稿器：part 任务先 pending 等认领（家庭宽带快路径），
+        # WAIT_WORKER_SEC 内无人认领由服务器兜底执行（3Mbps 慢路径）
+        job = upload_mod.create_job(room_id, clip_id, part_title, "part",
+                                    pending=True)
+        job["target_vid"] = vid
 
-    async def _sign(key: str, bucket: str = "") -> str:
-        return _presign_oss(key, bucket or "")
+        async def _sign_part(key: str, bucket: str = "") -> str:
+            return _presign_oss(key, bucket or "")
 
-    asyncio.create_task(upload_mod.run_job(job, dict(clip), form,
-                                           RECORDINGS_ROOT, _sign))
+        asyncio.create_task(upload_mod.server_fallback(
+            job, form, dict(clip), RECORDINGS_ROOT, _sign_part,
+            upload_mod.WAIT_WORKER_SEC))
+    else:
+        # ---- 新视频模式：v2.0.0 表单校验 + v2.3.0 合集参数 ----
+        title = (body.title or clip["title"] or "").strip() or \
+            f"切片 clip{clip_id}"
+        if len(title) > upload_mod.TITLE_MAX:
+            raise HTTPException(400, f"标题最长 {upload_mod.TITLE_MAX} 字")
+        if len(body.desc) > upload_mod.DESC_MAX:
+            raise HTTPException(400, f"简介最长 {upload_mod.DESC_MAX} 字")
+        tags = [t.strip() for t in body.tags.split(",") if t.strip()]
+        if len(tags) > upload_mod.TAG_MAX:
+            raise HTTPException(400, f"标签最多 {upload_mod.TAG_MAX} 个")
+        if any(len(t) > upload_mod.TAG_LEN_MAX for t in tags):
+            raise HTTPException(400, f"单个标签最长 {upload_mod.TAG_LEN_MAX} 字")
+        if body.source_type not in ("original", "reprint"):
+            raise HTTPException(400, "source_type 必须为 original / reprint")
+        if body.source_type == "reprint" and not body.source_url.strip():
+            raise HTTPException(400, "转载投稿必须填写来源地址")
+        if body.tid not in upload_mod.TIDS:
+            raise HTTPException(400, "投稿分区不在支持列表内")
+        if body.season_id and not body.section_id:
+            raise HTTPException(400, "选择合集时须同时指定小节（多小节合集"
+                                    "请在下拉中选择）")
+        form = {"mode": "new", "title": title, "desc": body.desc,
+                "tags": ",".join(tags), "tid": body.tid,
+                "source_type": body.source_type,
+                "source_url": body.source_url.strip(),
+                "cover_b64": body.cover_b64,
+                "season_id": body.season_id, "section_id": body.section_id}
+        job = upload_mod.create_job(room_id, clip_id, title, "new")
+
+        async def _sign(key: str, bucket: str = "") -> str:
+            return _presign_oss(key, bucket or "")
+
+        asyncio.create_task(upload_mod.run_job(job, dict(clip), form,
+                                               RECORDINGS_ROOT, _sign))
     return {"ok": True, "job": job["id"]}
 
 
 @app.get("/api/rooms/{room_id}/clips/{clip_id}/submit/{job_id}")
 async def submit_status(room_id: int, clip_id: int, job_id: str):
-    """投稿任务轮询：uploading / success（带 BV 号）/ failed（带原因）。"""
+    """投稿任务轮询：uploading / success（带 BV 号）/ failed（带原因）。
+
+    v2.3.0：附 mode（new/part）与 season_note（投稿成功但加入合集失败的
+    补充说明，前端据此提示手动处理）。"""
     job = upload_mod.get_job(job_id, room_id, clip_id)
     if not job:
         raise HTTPException(404, "投稿任务不存在（可能已过期或重启清空）")
     return {"job": job["id"], "status": job["status"], "bv": job["bv"],
-            "error": job["error"], "started_at": job["started_at"]}
+            "error": job["error"], "started_at": job["started_at"],
+            "mode": job.get("mode", "new"),
+            "season_note": job.get("season_note", "")}
+
+
+# ---------------------------------------------------------------------------
+# 投稿目标数据（v2.3.0：抽屉打开时拉取——账号信息 + 合集 + 稿件列表）
+# ---------------------------------------------------------------------------
+@app.get("/api/submit/targets")
+async def submit_targets():
+    """账号合集与稿件列表（clipper/admin；guest 由 middleware 403）。
+
+    数据来自 B 站创作中心接口（bili_api，60s 进程内缓存）；上游失败 502
+    透传可读原因，前端在抽屉里显示并允许重试。"""
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署（biliup 二进制或 "
+                                "cookies.json 缺失，见管理页·账号管理）")
+    try:
+        account, seasons, arcs = await asyncio.gather(
+            asyncio.to_thread(bili_api.fetch_account_info),
+            asyncio.to_thread(bili_api.fetch_seasons),
+            asyncio.to_thread(bili_api.fetch_arcs))
+    except bili_api.BiliApiError as e:
+        raise HTTPException(502, str(e))
+    return {"account": account, "seasons": seasons, "arcs": arcs}
+
+
+@app.get("/api/submit/arcs/{aid}/parts")
+async def submit_arc_parts(aid: int):
+    """指定稿件的分P列表（追加分P时选中目标视频后查重用）。"""
+    if aid <= 0:
+        raise HTTPException(400, "稿件 av 号不合法")
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署")
+    try:
+        parts = await asyncio.to_thread(bili_api.fetch_archive_parts, aid)
+    except bili_api.BiliApiError as e:
+        raise HTTPException(502, str(e))
+    return {"parts": parts}
+
+
+# ---------------------------------------------------------------------------
+# 本地投稿器（v2.3.0）：任务队列 / 认领 / 结果回报——上传执行搬到家庭宽带
+# 机器，服务器只调度记账；认领窗口超时由服务器兜底（见 server_fallback）
+# ---------------------------------------------------------------------------
+@app.get("/api/submit/queue")
+async def submit_queue():
+    """pending 的 part 任务列表（本地投稿器轮询用；clipper/admin）。"""
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署")
+    return {"jobs": [{"job": j["id"], "clip_id": j["clip_id"],
+                      "room_id": j["room_id"], "mode": j.get("mode", "part"),
+                      "part_title": j.get("title", ""),
+                      "target_vid": j.get("target_vid", "")}
+                     for j in upload_mod.pending_part_jobs()]}
+
+
+@app.post("/api/submit/queue/{job_id}/claim")
+async def submit_queue_claim(job_id: str):
+    """本地投稿器认领：返回参数载荷与 OSS 签名直链（长有效期，服务端
+    url_expiry_sec 配置）；任务已认领/已兜底 → 409。"""
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署")
+    j = upload_mod.JOBS.get(job_id)
+    if j is None:
+        raise HTTPException(404, "任务不存在")
+    if not upload_mod.claim_job(job_id):
+        raise HTTPException(409, "任务已被认领或已过期")
+    clip = _load_clip(j["room_id"], j["clip_id"])
+    oss_url = ""
+    if clip.get("oss_key") and oss_enabled():
+        oss_url = _presign_oss(clip["oss_key"], clip.get("oss_bucket") or "")
+    return {"job": j["id"], "clip_id": j["clip_id"], "room_id": j["room_id"],
+            "mode": j.get("mode", "part"),
+            "part_title": j.get("title", ""),
+            "target_vid": j.get("target_vid", ""),
+            "oss_key": clip.get("oss_key", ""), "oss_url": oss_url}
+
+
+class SubmitResultIn(BaseModel):
+    ok: bool = False
+    bv: str = ""
+    error: str = ""
+
+
+@app.post("/api/submit/queue/{job_id}/result")
+async def submit_queue_result(job_id: str, body: SubmitResultIn):
+    """本地投稿器回报结果（仅认领方可在 uploading 态回报一次）。"""
+    j = upload_mod.JOBS.get(job_id)
+    if j is None:
+        raise HTTPException(404, "任务不存在")
+    if not upload_mod.complete_job(job_id, {"ok": body.ok, "bv": body.bv,
+                                           "error": body.error}):
+        raise HTTPException(409, "任务状态不允许回报（未认领或已结束）")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 投稿账号管理（v2.3.0：管理页·账号管理 tab；/api/admin 前缀 middleware
+# 已限 admin。cookies 含 SESSDATA/access_token 等敏感凭据——只写不读，
+# 状态端点仅回有效性与账号昵称/mid/头像，绝不回传 cookie 内容）
+# ---------------------------------------------------------------------------
+class SubmitCookiesIn(BaseModel):
+    cookies_json: str = ""      # biliup login 生成的 cookies.json 全文
+
+
+@app.get("/api/admin/submit/cookies-file")
+async def submit_cookies_file():
+    """本地投稿器取 biliup 凭据文件内容（admin 专属）。敏感凭据仅回传
+    自己的投稿账号——投稿器每轮拉取，服务器侧 renew 后本机自动同步。"""
+    p = upload_mod.cookies_path()
+    if not p.exists():
+        raise HTTPException(404, "凭据文件不存在（先在账号管理配置投稿账号）")
+    return JSONResponse({"cookies": p.read_text("utf-8")})
+
+
+@app.post("/api/admin/submit/sync")
+async def submit_sync_run():
+    """手动触发一轮投稿记录同步（存在性核验 + 同名分P回填；平时由
+    daemon 线程每 6h 自动执行）。返回统计。"""
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署")
+    try:
+        st = await asyncio.to_thread(submit_sync.sync_once)
+    except Exception as e:                      # noqa: BLE001
+        raise HTTPException(502, f"同步失败：{e}")
+    return {"ok": True, **st}
+
+
+@app.get("/api/admin/submit/account")
+async def submit_account_status():
+    """投稿账号状态 + 投稿配置清单（v2.4.0 暴露逐项配置值与路径，前端
+    按项展示状态徽标与未就绪说明）。
+
+    upload_ready=False 表示网页 cookie（创作中心接口可用、新视频投稿的
+    APP 接口缺 access_token 不可用）——前端账号页给出提示。
+    """
+    bin_path = upload_mod.biliup_bin()
+    ck_path = upload_mod.cookies_path()
+    st = {"bin_configured": bool(bin_path),
+          "bin_path": bin_path,
+          "cookies_path": str(ck_path),
+          "cookies_present": ck_path.exists(),
+          "submit_enabled": upload_mod.submit_enabled(),
+          "upload_ready": bili_api.has_access_token(),
+          "cookie_ok": None, "account": None, "error": ""}
+    if st["cookies_present"]:
+        try:
+            info = await asyncio.to_thread(bili_api.fetch_account_info)
+            st["cookie_ok"] = info["ok"]
+            st["account"] = info
+            if not info["ok"]:
+                st["error"] = "cookies 已失效（nav 未登录态），请重新生成"
+        except bili_api.BiliApiError as e:
+            st["cookie_ok"] = False
+            st["error"] = str(e)
+    return st
+
+
+@app.post("/api/admin/submit/cookies")
+async def submit_cookies_set(body: SubmitCookiesIn):
+    """保存投稿凭据：支持完整 biliup cookies.json **或**浏览器 Cookie 串。
+
+    网页 Cookie 串保存时自动尝试「网页 Cookie 登录兑换」（bili_api
+    .exchange_web_login，biliup「网页Cookie登录1」等价：TV auth_code +
+    网页会话自动确认 + 轮询）换取完整凭据（含 access_token，新视频投稿
+    必需）；兑换失败则按网页凭据保存并单独返回原因（合集/分P 查询不受
+    影响）。落盘后立即 nav 验证；网络原因验证失败不回滚。"""
+    try:
+        cred = await asyncio.to_thread(bili_api.parse_credential_text,
+                                       body.cookies_json or "")
+    except bili_api.BiliApiError as e:
+        raise HTTPException(400, str(e))
+    exchanged = False
+    exchange_error = ""
+    kept_existing = False
+    doc = cred["doc"]
+    if cred["kind"] == "web":
+        try:
+            doc = await asyncio.to_thread(bili_api.exchange_web_login,
+                                          body.cookies_json)
+            exchanged = True
+        except bili_api.BiliApiError as e:
+            exchange_error = str(e)
+            # 现有凭据仍是完整登录（含 access_token）时不覆盖：网页 Cookie
+            # 兑换失败绝不能把好凭据降级成无 token 网页格式（2026-10-19
+            # 服务器实况：renew 后重贴 cookie，兑换瞬时 -101 回退覆盖，
+            # 导致 6 个分P任务全 -400）
+            if bili_api.has_access_token():
+                kept_existing = True
+                doc = None
+    if doc is not None:
+        p = upload_mod.cookies_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(doc, ensure_ascii=False), "utf-8")
+    bili_api.drop_cache()
+    try:
+        info = await asyncio.to_thread(bili_api.fetch_account_info)
+        return {"saved": doc is not None, "kind": cred["kind"],
+                "exchanged": exchanged, "exchange_error": exchange_error,
+                "kept_existing": kept_existing,
+                "upload_ready": bili_api.has_access_token(),
+                "cookie_ok": info["ok"], "account": info}
+    except bili_api.BiliApiError as e:
+        return {"saved": doc is not None, "kind": cred["kind"],
+                "exchanged": exchanged, "exchange_error": exchange_error,
+                "kept_existing": kept_existing,
+                "upload_ready": bili_api.has_access_token(),
+                "cookie_ok": False, "account": None, "error": str(e)}
+
+
+@app.delete("/api/admin/submit/cookies")
+async def submit_cookies_del():
+    """清除投稿凭据（前端二次确认；清除后投稿功能回到未部署态 503）。"""
+    p = upload_mod.cookies_path()
+    if p.exists():
+        p.unlink()
+    bili_api.drop_cache()
+    return {"ok": True}
+
+
+@app.post("/api/admin/submit/renew")
+async def submit_renew():
+    """刷新投稿登录（biliup renew：refresh_token 续期并原地更新文件）。"""
+    if not upload_mod.submit_enabled():
+        raise HTTPException(503, "投稿功能未部署（二进制或 cookies 缺失）")
+    try:
+        msg = await upload_mod.renew_login()
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    bili_api.drop_cache()
+    return {"ok": True, "message": msg}
+
+
+# ---------------------------------------------------------------------------
+# v2.4.0 扫码登录（账号管理页）：web 二维码 generate/poll，进程内会话。
+# B 站侧二维码 180s 有效；confirm 后合并设备指纹落盘 cookies.json 并 nav
+# 验证。密码登录不实现（极验 geetest 人机验证无法服务端自动化，B 站网页
+# 端亦已停用密码登录，调研见 bili_api.py v2.4.0 注释）。
+# ---------------------------------------------------------------------------
+_QR_SESSIONS: dict[str, float] = {}
+_QR_TTL_SEC = 300          # 本侧留存上限（长于 B 站 180s 有效期）
+_QR_MAX = 20               # 并发二维码会话上限
+
+
+def _qr_prune() -> None:
+    """清理过期二维码会话；超上限先踢最旧的。"""
+    now = time.time()
+    for k in [k for k, ts in _QR_SESSIONS.items() if now - ts > _QR_TTL_SEC]:
+        _QR_SESSIONS.pop(k, None)
+    while len(_QR_SESSIONS) > _QR_MAX:
+        _QR_SESSIONS.pop(min(_QR_SESSIONS, key=_QR_SESSIONS.get), None)
+
+
+@app.post("/api/admin/submit/qr/start")
+async def submit_qr_start():
+    """申请扫码登录二维码：返回 qrcode_key + SVG data URI（前端 <img> 直渲）。"""
+    import base64 as _b64
+    import io
+    key, url = await asyncio.to_thread(bili_api.qr_login_start)
+    svg = ""
+    try:
+        import qrcode
+        import qrcode.image.svg
+        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgImage,
+                          box_size=10, border=2)
+        buf = io.BytesIO()
+        img.save(buf)
+        svg = _b64.b64encode(buf.getvalue()).decode()
+    except Exception as e:              # noqa: BLE001 —— SVG 失败不阻断登录
+        print(f"[qr] SVG 生成失败：{e}", flush=True)
+    _qr_prune()
+    _QR_SESSIONS[key] = time.time()
+    return {"qrcode_key": key, "qr_url": url,
+            "svg": f"data:image/svg+xml;base64,{svg}"}
+
+
+@app.get("/api/admin/submit/qr/poll")
+async def submit_qr_poll(qrcode_key: str):
+    """轮询扫码状态；confirmed 时合并设备指纹落盘并 nav 验证。"""
+    if qrcode_key not in _QR_SESSIONS:
+        raise HTTPException(404, "二维码会话不存在或已过期")
+    st = await asyncio.to_thread(bili_api.qr_login_poll, qrcode_key)
+    if st["state"] != "confirmed":
+        return {"state": st["state"]}
+    if not st["cookies"].get("SESSDATA") or not st["cookies"].get("bili_jct"):
+        _QR_SESSIONS.pop(qrcode_key, None)
+        raise HTTPException(502, "扫码确认响应缺少会话 Cookie（可能被风控拦截）")
+    merged = dict(bili_api._fingerprint_cookie_dict())
+    merged.update(st["cookies"])
+    doc = bili_api.build_submit_cookies_doc(merged, st["refresh_token"])
+    p = upload_mod.cookies_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(doc, ensure_ascii=False), "utf-8")
+    bili_api.drop_cache()
+    _QR_SESSIONS.pop(qrcode_key, None)
+    # v2.4.0：扫码不含 access_token——确认后自动补齐（新视频投稿必需）：
+    # ① 先 renew（refresh_token 兑换 + 指纹合并修复）；网页扫码会话的
+    #    refresh_token 换不出 app token（实测 B 站只回新 refresh_token、
+    #    access_token 恒空）；② 仍缺则走网页会话 TV 兑换（biliup「网页
+    #    Cookie登录1」等价路径，实测可换出 access_token）。任何一步失败
+    #    不推翻登录结果，仅透传说明（前端据此提示受限）。
+    upload_ready = bili_api.has_access_token()
+    renew_note = ""
+    cookie_str = "; ".join(f"{k}={v}" for k, v in merged.items())
+    if not upload_ready and upload_mod.biliup_bin():
+        try:
+            await upload_mod.renew_login()
+            bili_api.drop_cache()
+            upload_ready = bili_api.has_access_token()
+        except RuntimeError as e:
+            renew_note = f"自动续期失败：{e}"[:150]
+    if not upload_ready:
+        try:
+            doc2 = await asyncio.to_thread(bili_api.exchange_web_login,
+                                           cookie_str)
+            old_doc = json.loads(p.read_text("utf-8"))
+            doc3 = bili_api.merge_renewed_cookies(old_doc, doc2)
+            p.write_text(json.dumps(doc3, ensure_ascii=False), "utf-8")
+            bili_api.drop_cache()
+            upload_ready = bili_api.has_access_token()
+            if not upload_ready:
+                renew_note = "自动续期与兑换均未获得 access_token"
+        except Exception as e:              # noqa: BLE001 —— 兜底失败仅提示
+            renew_note = (renew_note + ("；" if renew_note else "")
+                          + f"兑换失败：{e}")[:200]
+    try:
+        info = await asyncio.to_thread(bili_api.fetch_account_info)
+    except bili_api.BiliApiError as e:
+        return {"state": "confirmed", "account": None,
+                "cookie_str": cookie_str, "upload_ready": upload_ready,
+                "renew_note": renew_note, "error": str(e)}
+    return {"state": "confirmed", "account": info, "cookie_str": cookie_str,
+            "upload_ready": upload_ready, "renew_note": renew_note}
 
 
 @app.get("/api/rooms/{room_id}/clips/{clip_id}/cover-preview")

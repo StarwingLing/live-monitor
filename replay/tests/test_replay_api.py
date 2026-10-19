@@ -36,6 +36,10 @@ from fastapi.testclient import TestClient
 
 # ---- 生产模式 + 录像根指向临时目录（同 test_replay_auth）----
 app_mod.cfg["capture"]["admin_password"] = "test-admin-pw"
+# 存量缺陷修复（v2.3.0 顺带）：本地 config.toml 自 v2.2.5 起 recording
+# .enabled=false（托底采集对齐），起录端点会 400——测试须自带开关状态，
+# 不随本地配置漂移
+app_mod.cfg["recording"]["enabled"] = True
 app_mod.RECORDINGS_ROOT = TMP / "recordings"
 app_mod.RECORDINGS_ROOT.mkdir(exist_ok=True)
 from fastapi.staticfiles import StaticFiles as _SF

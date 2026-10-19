@@ -12,7 +12,9 @@ WorkingDirectory=/opt/live-qq-notify
 ExecStart=/opt/live-qq-notify/.venv/bin/python -m live_qq_notify.main
 Restart=always
 RestartSec=15
-MemoryMax=80M
+# v0.3.0:报告图生成走子进程(jieba 词典+wordcloud 渲染,峰值 ~200M 级),
+# 80M 会被 cgroup OOM 杀子进程 → 提到 400M(bili web 同栈实测 178.9M)
+MemoryMax=400M
 
 [Install]
 WantedBy=multi-user.target

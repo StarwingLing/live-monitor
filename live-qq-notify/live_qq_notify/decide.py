@@ -83,6 +83,28 @@ def effective_template(room_tpl: str, global_tpl: str) -> str:
     return room_tpl if room_tpl.strip() else global_tpl
 
 
+def room_effective(rc: dict, global_cfg: dict) -> dict:
+    """房间个人配置与全局合并(v0.3.0 机器人管理页主播卡片)。
+
+    房间覆盖值(非 None)优先,否则回退全局;返回含
+    notify_on / notify_off / report_offline(bool)与 debounce_offline(int)
+    四键的 dict——decide/apply_debounce/报告图判定按房间取这一份生效值。
+    文案模板的合并沿用 effective_template(空串=回退),不在此函数内。
+    """
+    return {
+        "notify_on": (rc["notify_on"] if rc.get("notify_on") is not None
+                      else bool(global_cfg.get("notify_on"))),
+        "notify_off": (rc["notify_off"] if rc.get("notify_off") is not None
+                       else bool(global_cfg.get("notify_off"))),
+        "report_offline": (rc["report_offline"]
+                           if rc.get("report_offline") is not None
+                           else bool(global_cfg.get("report_offline"))),
+        "debounce_offline": (rc["debounce_offline"]
+                             if rc.get("debounce_offline") is not None
+                             else int(global_cfg.get("debounce_offline", 300))),
+    }
+
+
 def decide(prev: dict | None, cur_status: int, now_iso: str,
            global_cfg: dict) -> Decision:
     """比对状态翻转,决定本轮动作。

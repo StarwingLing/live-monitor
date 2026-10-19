@@ -77,6 +77,11 @@
 
 ## 数据口径备忘
 
+- **场次封面（v2.4.1 / bili-monitor v2.5.1 锁步）**：`live_sessions.cover_url`
+  记录开播瞬间的直播间封面（get_info user_cover 优先、系统封面兜底），仅
+  新建场次分支写入（收养/重开沿用原封面）；改此列须同步 bili-monitor
+  db.py 与本侧 tests/helpers.py 建表子集。消费方为 bili-monitor 详情页
+  历史场次封面板块。
 - 本地开发：bili config 未设 admin_password = 调试模式，与生产**共用同一
   权限门**（v0.1.2 起）：完全匿名时 middleware 注入匿名管理员（用户名
   `(local)`，保持"打开就能用"）；**有任何会话则按会话角色完整校验**——
@@ -95,3 +100,4 @@
 - OSS：签名用公网 endpoint 客户端（懒加载），删除联动用临时内网客户端；
   `oss.enabled=false`（本地默认，读 bili config）时 /oss-url 404，页面走
   纯本地行为。
+

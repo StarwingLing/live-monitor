@@ -1,0 +1,67 @@
+# song-detector 配置示例（复制为 config.toml 后生效；文件不建则全部用内置默认值）
+# 所有键都是可选的——只写想改的键即可，其余沿用默认。
+# 参数含义见各键行内注释。
+# 注意：下面三个顶层键必须写在任何 [节] 标题之前（TOML 语义：跟在
+# [xxx] 后的键属于该节，不再属于顶层）。
+
+# 同组相邻段间隔 <= merge_gap 秒时合并（吸收段内短暂低分间隙）
+merge_gap = 3.0
+# 合并后时长 < min_duration 秒的段落丢弃（「连续 ≥2 分钟才算唱歌段」= 120）
+min_duration = 10.0
+# 结果 JSON 是否携带逐帧分数（网页时间轴需要；嫌文件大可置 false）
+save_frame_scores = true
+# 歌曲判定模式（full_28 真实录播标定）：true = 音乐主导——唱歌片段按
+# 「music 过阈 + 说话抑制 + 连续 >= min_duration」判定，并带「唱歌尖峰占比」
+# 列区分有人唱/纯伴奏（带伴奏人声在 YAMNet 整体落 Music 子树，Singing 类
+# 只呈尖峰，严格模式出不了 2 分钟段）；false = 严格按 Singing 类迟滞段
+songs_from_music = true
+
+[model]
+# YAMNet 模型来源：TFHub URL 或本地目录。
+# 网络不通时可手动下载 https://tfhub.dev/google/yamnet/1 的压缩包，
+# 解压到 models/yamnet 后改为 "models/yamnet"（相对项目根或绝对路径）。
+path = "https://tfhub.dev/google/yamnet/1"
+# 分块推理块长（秒）：块大单次调用快、内存略增；默认 60 足够
+chunk_seconds = 60
+
+[boundary]
+# 歌曲段边界修形（真实录播参考点标定；改动前先小样验证）
+# ① 干净伴奏碎片吸收：分数凹陷切出的干净伴奏短碎片并回相邻保留段
+fragment_absorb_gap = 6.0
+fragment_absorb_max_speech = 0.15
+fragment_absorb_min_len = 10.0
+# ② 说话尾延：段尾「伴奏仍在走但主播在说话」时沿说话延伸结束点
+tail_speech_floor = 0.30
+tail_extend_sec = 8.0
+
+[singing]
+# 唱歌段迟滞双阈值：>=enter 开段，开段中 <exit 关段。
+# 漏检多 → 调低 enter（如 0.25）；误报多 → 调高（如 0.35）
+enter = 0.30
+exit = 0.15
+# 唱歌尖峰判定线：帧唱歌分 >= 此值计入歌曲段报告的「唱歌尖峰占比」列
+vocal_floor = 0.15
+
+[music]
+# 音乐/伴奏段阈值（比唱歌组高，压纯 BGM 误报）
+enter = 0.40
+exit = 0.20
+# BGM 抑制：music 段内说话平均分超过阈值 → 判「说话+背景音乐」丢弃。
+# 电台类直播间 BGM 常开时保持开启；确有纯伴奏想保留可置 false
+require_low_speech = true
+speech_threshold = 0.50
+
+[output]
+# 报告是否包含音乐/伴奏段（CLI --no-music 等效于此处置 false）
+include_music = true
+# 结果输出目录；不填 = 项目 results/ 目录
+# dir = "D:/某个绝对路径"
+
+# 类别分组覆盖（一般不动；默认组已对照官方 class map 核对）：
+# classes = { singing = [24, 25, 26, 27, 28, 29, 30, 31, 32, 213, 233, 249, 250],
+#             music   = [],   # 留空 = 回退默认
+#             speech  = [0, 1, 2, 3, 4, 5, 63, 65] }
+
+# 目录批量分析识别的扩展名（小写）
+media_extensions = ["mp4", "flv", "mkv", "mov", "ts", "m4a",
+                    "mp3", "wav", "flac", "ogg", "opus", "aac"]

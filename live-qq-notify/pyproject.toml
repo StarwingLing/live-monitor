@@ -3,7 +3,11 @@ name = "live-qq-notify"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "alibabacloud-oss-v2>=1.4.0",
     "httpx>=0.28.1",
+    "jieba>=0.42.1",
+    "pillow>=13.0.0",
+    "wordcloud>=1.9.6",
 ]
 
 [[tool.uv.index]]

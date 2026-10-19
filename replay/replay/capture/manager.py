@@ -9,6 +9,7 @@
 - 每 30s 热加载 rooms 表（页面增删房间无需重启服务）。
 """
 import asyncio
+import datetime as dt
 import http.cookies
 import time
 
@@ -129,6 +130,10 @@ async def fetch_room_metrics(session: aiohttp.ClientSession, room_id: int) -> di
         # v0.5：透传直播标题（getInfoByRoom 返回值自带，零新增请求），
         # poll_live_status 据此在标题变化时写 session_titles
         out["title"] = base.get("title")
+        # v2.5.1：透传直播间封面（get_info 自带，零新增请求）——建场时写入
+        # live_sessions.cover_url（详情页历史场次封面板块数据源）；主播设置
+        # 封面（user_cover）优先，回退系统封面（cover），均无则空串
+        out["cover"] = base.get("user_cover") or base.get("cover") or ""
     try:
         async with session.get(ROOM_INDEX_API, params={"room_id": room_id},
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -189,6 +194,29 @@ async def fetch_emotes(session: aiohttp.ClientSession, room_id: int) -> list[dic
         return out
     except Exception:
         return []
+
+
+def _auto_full_hold(last_rows: list[dict], backoff_sec: float,
+                    now: dt.datetime) -> bool:
+    """连续起流失败的退避判定（纯函数，可单测）。
+
+    自动全程对账每轮（auto_full_poll_sec）在播即插一条 requested 行；
+    若拉流地址持续发放不出来（延迟直播空窗、B 站接口故障等），每轮
+    必失败的 requested 行会刷爆归档列表（2026-10-19 某主播 300s 延迟
+    直播 70 分钟 138 条 failed 实证）。本判定在「本房最近两条 auto 行
+    均为 failed」时按退避期压住新行插入；单条失败仍保持原 30s 快重试，
+    瞬时抖动不受影响。backoff_sec<=0 = 关闭退避（回到老行为）。
+    """
+    if backoff_sec <= 0 or len(last_rows) < 2:
+        return False
+    if any(r["status"] != "failed" for r in last_rows):
+        return False
+    try:
+        fail_dt = dt.datetime.strptime(last_rows[0]["ended_at"] or "",
+                                       "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return (now - fail_dt).total_seconds() < backoff_sec
 
 
 class RoomClient:
@@ -323,7 +351,8 @@ class RoomClient:
         self._last = m  # 记住本次值供下次失败时沿用
 
         if live == 1 and self.session_id is None:
-            await self._open_or_adopt_session()
+            await self._open_or_adopt_session(
+                cover=m.get("cover") or self._last.get("cover") or "")
             # 整场录制由扫描循环独立触发（自动全程对账 / 手动请求行），
             # 开播本身不再起任何流（v2.2 高能缓冲流已随高能功能移除）
         elif live != 1 and self.session_id is not None and not self._ending:
@@ -383,7 +412,7 @@ class RoomClient:
                 (self.session_id, title, now_iso(), now_iso()))
             self._last_title = title
 
-    async def _open_or_adopt_session(self) -> None:
+    async def _open_or_adopt_session(self, cover: str = "") -> None:
         """检测到开播：按优先级"收养"已有场次，没有才新建。
 
         1. 遗留未关闭场次（服务重启、崩溃恢复后直播仍在进行）→ 沿用不拆场；
@@ -391,6 +420,9 @@ class RoomClient:
            视作同一场误判拆场：重开该场次（end_time 置空继续记），
            主播短时间下播又复播（网络波动/换设备）不会产生碎片场次；
         3. 都不满足 → 新建场次。
+
+        cover 为本次轮询透传的直播间封面（v2.5.1）：仅新建分支写入
+        （收养/重开沿用该场开播时的原始封面，直播中途换封面不覆盖）。
         """
         orphan = self.manager.db.query(
             "SELECT session_id FROM live_sessions WHERE room_id = ? AND end_time IS NULL "
@@ -424,8 +456,9 @@ class RoomClient:
                       f"重开场次 #{self.session_id}（不拆场）")
                 return
         cur = self.manager.db.execute(
-            "INSERT INTO live_sessions (room_id, start_time) VALUES (?, ?)",
-            (self.room_id, now_iso()))
+            "INSERT INTO live_sessions (room_id, start_time, cover_url) "
+            "VALUES (?, ?, ?)",
+            (self.room_id, now_iso(), cover))
         self.session_id = cur.lastrowid
         self.handler.session_id = self.session_id
         print(f"[capture] 房间{self.room_id} 开播，场次 #{self.session_id}")
@@ -794,6 +827,16 @@ class RoomManager:
                         "SELECT 1 FROM recordings WHERE room_id = ? AND status IN "
                         "('requested', 'recording', 'stop_requested', 'finalizing') "
                         "LIMIT 1", (rid,))):
+                continue
+            # v2.3.1：连续起流失败退避（延迟直播等持续拉不到流的场景
+            # 降频重试，防 failed 行每 30s 刷一条），见 _auto_full_hold
+            if _auto_full_hold(
+                    self.db.query(
+                        "SELECT status, ended_at FROM recordings "
+                        "WHERE room_id = ? AND source = 'auto' "
+                        "ORDER BY id DESC LIMIT 2", (rid,)),
+                    float(rcfg.get("auto_full_retry_backoff_sec", 300)),
+                    dt.datetime.now()):
                 continue
             info = await fetch_room_info(self.http_session, rid)
             if info is None or info.get("live_status") != 1:

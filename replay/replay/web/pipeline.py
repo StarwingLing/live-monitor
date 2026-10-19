@@ -608,7 +608,17 @@ def _low_quality_worker() -> None:
 
 
 def start() -> None:
-    """启动后台管线线程（replay-web lifespan 调用，daemon 随进程退出）。"""
+    """启动后台管线线程（replay-web lifespan 调用，daemon 随进程退出）。
+
+    v2.3.0：新增 [oss].pipeline_enabled 闸门（默认 True）——本地开发/调试
+    环境配 [oss] 只读用途（OSS 签名播放/投稿回拉）时置 false：转码+上云+
+    归档+释放管线涉及**真实云端对象与本地文件删除**（零留存策略），绝不该
+    在测试机上自动跑（例：本地托底 full_28.mp4 会被上云后按策略删除）。
+    """
+    if not bool(cfg.get("oss", {}).get("pipeline_enabled", True)):
+        print("[pipeline] pipeline_enabled=false：管线线程不启动"
+              "（本地调试/只读 OSS 模式）")
+        return
     import threading
     threading.Thread(target=_low_quality_worker, daemon=True,
                      name="low-quality").start()

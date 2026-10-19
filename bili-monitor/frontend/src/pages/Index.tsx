@@ -2,14 +2,14 @@
 // + 云场 hero 背景（自托管版，定稿 CloudField 同款视觉，2026-10-09 用户经
 // 临时选择页选定）。v1.6：原「录制」跳转列已按用户要求移除（回放动线
 // 归 replay 项目，两站独立）。
-// v2.3：管理员新增「通知」列——开播 QQ 群通知开关 + 设置入口（齿轮弹窗
-// NotifyPop：房间级群映射/专属文案；配置写共享库 qq_notify，通知器热加载）。
+// v2.4.0：管理员「机器人」列——房间机器人开关（原 v2.3「通知」列）；房间级
+// 群映射/个人配置弹窗(NotifyPop)已移除,统一在「机器人管理」页的主播
+// 个人配置卡片维护。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { api, fetchMe, patchJson } from "../api";
 import { fmtNum, toast, avatarGradient } from "../ui";
 import CloudBg from "../fx/CloudBg";
-import NotifyPop from "./NotifyPop";
 
 // WebGL 不可用 / 动效降级 / 窄屏时的 CSS 静态光晕（与云场的色调呼应）
 const GLOW_BG =
@@ -33,7 +33,6 @@ export default function Index() {
   const [subtitle, setSubtitle] = useState("加载中…");
   const [bgOk, setBgOk] = useState(false);
   const [admin, setAdmin] = useState(false);
-  const [popRoom, setPopRoom] = useState<RoomRow | null>(null);
 
   useEffect(() => {
     fetchMe().then((m) => setAdmin(m.role === "admin")).catch(() => {});
@@ -71,8 +70,8 @@ export default function Index() {
       x.room_id === r.room_id ? { ...x, notify_enabled: next } : x) : rs);
     try {
       await patchJson(`/api/rooms/${r.room_id}/qq-notify`, { enabled: next });
-      toast(next ? `已开启 ${r.anchor_name || r.room_id} 的开播通知`
-                 : `已关闭 ${r.anchor_name || r.room_id} 的开播通知`);
+      toast(next ? `已开启 ${r.anchor_name || r.room_id} 的机器人通知`
+                 : `已关闭 ${r.anchor_name || r.room_id} 的机器人通知`);
     } catch (e: any) {
       setRooms((rs) => rs ? rs.map((x) =>
         x.room_id === r.room_id ? { ...x, notify_enabled: !next } : x) : rs);
@@ -123,7 +122,7 @@ export default function Index() {
               <th>粉丝 / 大航海</th>
               <th>营收</th>
               <th>互动数</th>
-              {admin && <th style={{ width: 96 }}>通知</th>}
+              {admin && <th style={{ width: 84 }}>机器人</th>}
             </tr>
           </thead>
           <tbody>
@@ -206,33 +205,11 @@ export default function Index() {
                     <div className="nf-cell">
                       <button className={"nf-sw" + (r.notify_enabled ? " on" : "")}
                               role="switch" aria-checked={!!r.notify_enabled}
-                              title={r.notify_enabled ? "关闭开播通知" : "开启开播通知"}
+                              title={r.notify_enabled
+                                ? `关闭 ${r.anchor_name || r.room_id} 的机器人通知`
+                                : `开启 ${r.anchor_name || r.room_id} 的机器人通知`}
                               onClick={() => toggleNotify(r)}>
                         <span className="nf-knob" />
-                      </button>
-                      <button className={"nf-gear" + (r.notify_custom ? " custom" : "")}
-                              title={r.notify_group_count
-                                ? `已配 ${r.notify_group_count} 个群${r.notify_custom ? " · 专属文案" : ""},点击设置`
-                                : "未配置目标群,点击设置"}
-                              onClick={() => setPopRoom(r)}>
-                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
-                             stroke="currentColor" strokeWidth="1.8">
-                          <circle cx="12" cy="12" r="3.2" />
-                          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83
-                                   l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4
-                                   0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2
-                                   2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0
-                                   0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.03 1.7
-                                   1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7
-                                   1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4
-                                   0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2
-                                   2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7
-                                   1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0
-                                   0-1.56 1.03z" />
-                        </svg>
-                        {(r.notify_group_count || 0) > 0 && (
-                          <span className="nf-gcount">{r.notify_group_count}</span>
-                        )}
                       </button>
                     </div>
                   </td>
@@ -242,10 +219,6 @@ export default function Index() {
           </tbody>
         </table>
       </div>
-      {popRoom && (
-        <NotifyPop room={popRoom} onClose={() => setPopRoom(null)}
-                   onSaved={() => load().catch(() => {})} />
-      )}
     </>
   );
 }

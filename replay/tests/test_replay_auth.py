@@ -45,6 +45,9 @@ PAGE_OK = (200, 503)
 
 # ---- 生产模式：启用登录门 + 录像根指向临时目录 ----
 app_mod.cfg["capture"]["admin_password"] = "test-admin-pw"
+# 存量缺陷修复（v2.3.0 顺带）：本地 config.toml 自 v2.2.5 起 recording
+# .enabled=false，起录端点 400——测试须自带开关状态，不随本地配置漂移
+app_mod.cfg["recording"]["enabled"] = True
 app_mod.RECORDINGS_ROOT = TMP / "recordings"
 app_mod.RECORDINGS_ROOT.mkdir(exist_ok=True)
 # /recordings 静态挂载在 import 时绑定了真实路径，测试环境替换挂载实例
@@ -334,7 +337,9 @@ me = b2.get("/api/auth/me").json()
 check("桥接：映射为 clipper+昵称",
       me["role"] == "clipper" and me["room_id"] == 101 and me["nickname"] == "老切片")
 
-# ---- oss-url：OSS 未启用 404 ----
+# ---- oss-url：OSS 未启用 404（存量缺陷修复 v2.3.0 顺带：本地 config.toml
+# 可能已开只读 OSS（联调用），测试须自带开关状态，不随本地配置漂移）----
+app_mod.cfg["oss"]["enabled"] = False
 r = a.get("/api/rooms/101/oss-url?key=recordings/101/x.mp4")
 check("OSS 未启用 404", r.status_code == 404)
 

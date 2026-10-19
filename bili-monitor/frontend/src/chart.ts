@@ -14,13 +14,29 @@ export const TOOLTIP_THEME = {
   extraCssText: "border-radius: 8px; box-shadow: 0 8px 24px rgba(2, 6, 14, .5);",
 };
 
-export function useChart(option: EChartsOption | null) {
+export function useChart(option: EChartsOption | null,
+                         onInit?: (inst: echarts.ECharts) => void) {
   const ref = useRef<HTMLDivElement>(null);
   const inst = useRef<echarts.ECharts | null>(null);
   useEffect(() => {
+    // v2.5.1：option 归空即销毁实例并清引用。否则两坑：① React 对同位置
+    // 同标签 div 只改属性不换节点——骨架屏分支复用原 chart-box 节点时，
+    // echarts 命令式插入的 canvas 不属于 React 子树、条件分支清不掉它，
+    // 骨架块底下透出旧图；② 残留实例绑在旧节点引用上，数据回来时
+    // `inst || init` 短路跳过重建，setOption 落在死实例静默无效（曲线
+    // 板块 v2.2 曾在 StrictMode 踩过同款）。其余页面 option 仅首载前为
+    // null（加载期间沿用旧图），不受本改动影响。
+    if (option == null) {
+      inst.current?.dispose();
+      inst.current = null;
+      return;
+    }
     if (!ref.current) return;
-    inst.current = inst.current || echarts.init(ref.current);
-    if (option) inst.current.setOption(option);
+    if (!inst.current) {
+      inst.current = echarts.init(ref.current);
+      onInit?.(inst.current);
+    }
+    inst.current.setOption(option);
     const onR = () => inst.current?.resize();
     window.addEventListener("resize", onR);
     return () => window.removeEventListener("resize", onR);

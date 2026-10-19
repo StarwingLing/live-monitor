@@ -16,3 +16,14 @@ api_base = "https://api.live.bilibili.com"
 interval = 15     # 轮询间隔(秒)
 timeout = 10      # 单请求超时(秒)
 backoff_rounds = 5  # B 站连续失败 N 轮后打 WARNING(失败轮沿用上轮状态)
+
+# 报告图 OSS 中转(v0.3.0,official 通道;群富媒体只收公网 URL,本地生成的
+# 报告图须经 OSS 签名直链中转,见 live_qq_notify/oss.py)。本地默认关;
+# 服务器与 replay 项目同一份 AK(上传走内网 endpoint 零公网流量费):
+#[oss]
+#enabled = true
+#region = "cn-hangzhou"
+#bucket = "<桶名>"
+#access_key_id = "<AK>"
+#access_key_secret = "<SK>"
+#internal_upload = true

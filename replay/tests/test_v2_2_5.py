@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """v2.2.5 改动点的进程内测试：SC 双推去重（handler._on_super_chat）。
 
-背景：2026-10-16 18:26:09 房间 1024 的 ¥1000 SC 被 B 站在同一秒
+背景：2026-10-16 18:26:09 房间 <房间号> 的 ¥1000 SC 被 B 站在同一秒
 连推两帧 SUPER_CHAT_MESSAGE，采集端原先无去重重复入库（gifts 表
 id 78354/78355 两行完全相同，虚增营收 ¥1000）。修复按
 (uid, price, start_time) 60 秒窗口去重。本套覆盖：
@@ -32,7 +32,7 @@ def check(name: str, ok: bool, detail: str = ""):
 from replay.capture.handler import EventRouter
 
 queue: asyncio.Queue = asyncio.Queue()
-router = EventRouter(1024, queue)   # caches 缺省 None：SC 路径不使用
+router = EventRouter(7734200, queue)   # caches 缺省 None：SC 路径不使用
 router.session_id = 197
 
 

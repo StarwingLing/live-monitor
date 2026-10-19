@@ -148,6 +148,10 @@ pipeline._clips_bucket = lambda: "mid-b"
 
 # config：mid 桶 + 归档 10 天 + 零留存（记录原值，末尾恢复）
 CFG = app_mod.cfg
+# 存量缺陷修复（v2.3.0 顺带）：本地 config.toml 自 v2.2.5 起 recording
+# .enabled=false，轮换收尾相关断言漂移——测试须自带开关状态（在 ORIG
+# 快照前置位，恢复语义不变）
+CFG["recording"]["enabled"] = True
 ORIG = {k: dict(CFG.get(k, {})) for k in ("oss", "recording")}
 CFG.setdefault("oss", {})
 CFG["oss"].update({"enabled": True, "bucket": "main-b",

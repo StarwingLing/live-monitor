@@ -4,19 +4,34 @@
 > 凡涉及本项目的对话:先读仓库根文件,再读本文件。
 > 功能与结构详解见 `tutorial/`。
 
-## 项目形态(v0.2.0)
+## 项目形态(v0.4.0)
 
-B 站开播状态 → QQ 群通知:独立轮询器(15s,`/opt/live-qq-notify`)+ **双发送通道**
-+ bili-monitor v2.3.1 配置 UI。配置全在共享库(`qq_notify`/`qq_notify_global`
-/**`qq_group_map` 群号→openid 映射表**,DDL 属主本项目,bili db.py 锁步——改表结构
-须同版同步两侧):
+B 站开播状态 → QQ 群通知:独立轮询器(15s,`/opt/live-qq-notify`)+ **多机器人
+双发送通道** + bili-monitor v2.5.0「机器人管理」页。配置全在共享库——
+**机器人档案表 `qq_bots`**(v0.4.0 起,每行一个机器人,承载通道/凭据/指令表/
+通知开关文案防抖/AI 七列,旧全局表 qq_notify_global 冻结保留)/`qq_notify`
+(房间级,含 bot_id 归属与 join_check 入群核查开关)/**`qq_group_map` 群号→
+openid 映射表**(v0.4.0 改复合主键 bot_id+group_id:同群不同机器人 openid
+并存;remark 备注列 bili 管理页行内编辑,本进程不读写),DDL 属主本项目,
+bili db.py 锁步——改表结构须同版同步两侧;通知器按房间 bot_id 分组、
+用各自机器人凭据/映射/文案发送(写锁退避重试含在 ensure_tables,防 capture
+高频写库撞锁):
 
 - **official(当前生产通道)**:QQ 官方机器人 OpenAPI(AppID/Secret 换 AccessToken),
   无风控踢线;房间配置统一填 QQ 群号,发送前经映射表换 openid(未绑定群 WARN 跳过);
-  封面图为文本后独立一条图片消息;凭据与通道开关在 qq_notify_global(channel 列)。
+  封面/报告图均为文本后独立一条图片消息;凭据与通道开关在 qq_notify_global(channel 列)。
+  **群富媒体只收公网 URL**(multipart 直传被拒 40093007):报告图经本项目
+  `oss.py` 中转——config.toml `[oss]` 段(与 replay 同桶同 AK;服务器内网上传/
+  公网签名、本地 internal_upload=false)→30 分钟签名 URL→发完即删。
 - **napcat(备用)**:协议端 `/root/Napcat` rootless 扫码,被腾讯风控反复踢线
   (10-15/16 事故,见版本笔记 v0.1.0),页面切回即用;群映射获取绑定会话/指令自动回复
   /事件中枢等 v0.2.0 新功能仅 official 可用。
+- **下播报告图(v0.3.0)**:下播文本后子进程 `report.py` 生成本场报告图紧随发同批群
+  (Pillow+wordcloud+jieba,字体随包 assets/fonts≈17MB,头像/表情原图缓存
+  data/avatar_cache);开关三态(全局 report_offline + 房间个人覆盖,NULL=跟随全局,
+  `decide.room_effective` 合并);CLI 同入口可手动出图
+  (`uv run python -m live_qq_notify.report --db ... --session <id>`);单元
+  MemoryMax=400M(生成子进程峰值 ~176MB);实测文本→图片间隔约 7s。
 
 ## 关键红线
 

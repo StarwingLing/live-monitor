@@ -17,3 +17,7 @@ config.toml
 # （换机恢复：frontend/ 下 npm install && npm run build 重建 dist）
 frontend/node_modules/
 frontend/dist/
+
+# 本地一次性配置备份与临时排查脚本（不入库）
+config.toml.pre-*
+deploy/quality_probe.py

@@ -41,6 +41,11 @@ export interface ClipRow {
   status: string; reason: string; created_by: string; created_at: string;
   ended_at?: string; file_url?: string; in_local?: boolean; on_oss: boolean;
   oss_key: string; oss_low_key: string; notes: Note[];
+  // v2.3.0 投稿结果（服务器持久真源）：刷新/重启后「已投稿」徽标仍显示；
+  // alive=0 = 长周期核验发现稿件/分P已被删（胶囊隐藏）
+  submission?: { bv: string; mode: string; title: string;
+                 submitted_at: string; season_note: string;
+                 alive?: number } | null;
 }
 export interface RecRow {
   id: number; status: string; title: string; started_at: string;
@@ -78,6 +83,9 @@ interface Entry {
   isFullRec: boolean; disabled: boolean; inLocal: boolean; onOss: boolean;
   ossFullKey: string; ossLowKey: string;
   source: string;   // 录制行来源（auto/bridge/manual；bridge=衔接片命名用）
+  submission?: { bv: string; mode: string; title: string;
+                 submitted_at: string; season_note: string;
+                 alive?: number } | null;
 }
 
 function clipEntry(c: ClipRow, recId: number): Entry {
@@ -94,6 +102,7 @@ function clipEntry(c: ClipRow, recId: number): Entry {
     inLocal: c.in_local !== undefined ? !!c.in_local : !!c.file_url,
     onOss: !!c.on_oss, ossFullKey: c.oss_key || "",
     ossLowKey: c.oss_low_key || "", source: "",
+    submission: c.submission || null,
   };
 }
 
@@ -164,15 +173,18 @@ export default function Replay() {
   const [sideOpen, setSideOpen] = useState(false);
   const [drawerKey, setDrawerKey] = useState<string | null>(null);
 
-  // 气泡：重命名 / 下载 / 投稿（v2.0.0 后两个）
+  // 气泡：重命名 / 下载（v2.0.0）+ 回灌/删除（v2.0.1）
   const [renamePop, setRenamePop] = useState<{ key: string; anchor: HTMLElement } | null>(null);
   const [dlPop, setDlPop] = useState<{ key: string; anchor: HTMLElement } | null>(null);
   const [restorePop, setRestorePop] = useState<{ key: string; anchor: HTMLElement } | null>(null);
   const [delPop, setDelPop] = useState<{ key: string; anchor: HTMLElement } | null>(null);
-  const [subPop, setSubPop] = useState<{ key: string; anchor: HTMLElement } | null>(null);
+  // 投稿抽屉（v2.3.0：气泡改抽屉，放下合集/分P 表单）：key = 组键
+  const [subDrawer, setSubDrawer] = useState<string | null>(null);
 
   // 投稿任务（v2.0.0）：clipId → 任务态；3s 轮询 uploading
-  const [jobs, setJobs] = useState<Record<number, { id: string; status: string; bv: string; error: string }>>({});
+  // v2.3.0：mode（new/part）用于成功 toast 文案区分；season_note 为
+  // 「投稿成功但加入合集失败」的补充提示
+  const [jobs, setJobs] = useState<Record<number, { id: string; status: string; bv: string; error: string; mode?: string; seasonNote?: string }>>({});
 
   // 播放器懒加载（v2.0.0）：进入页面仅第一个含可播视频的组挂载播放器
   // （其余显示占位，点击该视频/选择列表后再加载），配合「点击即起播 →
@@ -305,19 +317,33 @@ export default function Replay() {
       const next = { ...jobs };
       let changed = false;
       for (const [cidS, j] of Object.entries(jobs)) {
-        if (j.status !== "uploading") continue;
+        if (j.status !== "uploading" && j.status !== "pending") continue;
         try {
-          const r = await api<{ status: string; bv: string; error: string }>(
+          const r = await api<{ status: string; bv: string; error: string;
+                                mode?: string; season_note?: string }>(
             `/api/rooms/${ROOM}/clips/${cidS}/submit/${j.id}`);
           if (r.status !== j.status) {
             changed = true;
-            next[+cidS] = { ...j, status: r.status, bv: r.bv, error: r.error };
+            next[+cidS] = { ...j, status: r.status, bv: r.bv, error: r.error,
+                            mode: r.mode, seasonNote: r.season_note };
             if (r.status === "success" && r.bv)
-              toast(`投稿成功：${r.bv}`, "ok");
+              toast(r.mode === "part" ? `分P已追加：${r.bv}` : `投稿成功：${r.bv}`, "ok");
             else if (r.status === "failed")
               toast("投稿失败：" + r.error, "err");
+            // fail-soft：投稿成功但加入合集失败 → 单独红提示（手动补加）
+            if (r.status === "success" && r.season_note)
+              toast(r.season_note, "err");
           }
-        } catch { /* 下轮重试 */ }
+        } catch (e: any) {
+          // v2.3.0：404 = 任务已过期（服务重启/2h TTL 清空）——静默重试会
+          // 让「投稿中」永远挂着，改为提示并摘除任务（成功结果会经
+          // clip_submissions 落库在刷新后仍显示「已投稿」）
+          if (e.status === 404) {
+            changed = true;
+            delete next[+cidS];
+            toast("投稿任务已过期（服务重启或超时），请刷新页面查看投稿结果", "err");
+          }
+        }
       }
       if (changed) setJobs(next);
     }, 3000);
@@ -802,7 +828,7 @@ export default function Replay() {
                 onDl={(anchor) => setDlPop({ key: grpKey(d.date, g, i), anchor })}
                 onRestore={(anchor) => setRestorePop({ key: grpKey(d.date, g, i), anchor })}
                 onDel={(anchor) => setDelPop({ key: grpKey(d.date, g, i), anchor })}
-                onSubmit={(anchor) => setSubPop({ key: grpKey(d.date, g, i), anchor })}
+                onSubmit={() => setSubDrawer(grpKey(d.date, g, i))}
                 onCancelCut={cancelLiveCut}
                 refresh={refresh}
                 jobs={jobs}
@@ -832,16 +858,16 @@ export default function Replay() {
           onClose={() => setDlPop(null)}
         />
       )}
-      {subPop && (
-        <SubmitPop
-          anchor={subPop.anchor}
-          entry={resolveSel(subPop.key, groupsFlat.find((x) => x.key === subPop.key)!.g)}
+      {subDrawer && (
+        <SubmitDrawer
+          entry={resolveSel(subDrawer, groupsFlat.find((x) => x.key === subDrawer)!.g)}
           ROOM={ROOM}
-          onClose={() => setSubPop(null)}
+          onClose={() => setSubDrawer(null)}
           onJob={(clipId, job) =>
             setJobs((j) => ({ ...j, [clipId]: job }))}
         />
       )}
+      <ClipScrim open={!!subDrawer} onClose={() => setSubDrawer(null)} />
       {restorePop && (
         <RestorePop
           anchor={restorePop.anchor}
@@ -914,7 +940,7 @@ function GroupCard(p: {
   onDl: (anchor: HTMLElement) => void;
   onRestore: (anchor: HTMLElement) => void;
   onDel: (anchor: HTMLElement) => void;
-  onSubmit: (anchor: HTMLElement) => void;
+  onSubmit: () => void;   // v2.3.0：气泡改抽屉，不再需要锚点
   onCancelCut: (cid: number) => void;
   refresh: () => void;
   jobs: Record<number, { id: string; status: string; bv: string; error: string }>;
@@ -968,9 +994,9 @@ function GroupCard(p: {
         {e.status === "failed" && <span className="badge err">失败</span>}
         {e.status === "processing" && <span className="badge cut pulse">切片中</span>}
         {e.status === "pending" && <span className="badge pend">排队中</span>}
-        {cj && (
-          <span className={"badge " + (cj.status === "uploading" ? "pend pulse" : "cut")}>
-            {cj.status === "uploading" ? "投稿中" : "已投稿"}
+        {(cj || (c.submission && c.submission.alive !== 0)) && (
+          <span className={"badge " + (cj && cj.status !== "success" && cj.status !== "failed" ? "pend pulse" : "cut")}>
+            {cj && cj.status !== "success" && cj.status !== "failed" ? "投稿中" : "已投稿"}
           </span>
         )}
         {!e.live && (
@@ -1037,7 +1063,7 @@ function GroupCard(p: {
                   {/* v2.0.0 切片投稿（clipper/admin） */}
                   {!effEntry.isFullRec && effEntry.etype === "clip" && p.CAN_WRITE &&
                     effEntry.status === "done" && (
-                    <button onClick={(e) => p.onSubmit(e.currentTarget)}>投稿</button>
+                    <button onClick={() => p.onSubmit()}>投稿</button>
                   )}
                   {/* v2.0.1 删除双选项气泡（原 confirm 直删改为 DelPop） */}
                   {effEntry.etype === "rec"
@@ -1085,9 +1111,10 @@ function GroupCard(p: {
                 ? (effEntry.qn >= 200 ? "4K 档" : "1080P60")
                 : "切片") +
               (effEntry.onOss && effEntry.inLocal === false ? " · 云端" : "")}
-            {job && (
+            {((job || effEntry?.submission) && (!effEntry?.submission || effEntry.submission.alive !== 0)) && (
               <span className="badge pend pulse" style={{ marginLeft: 10 }}>
-                {job.status === "uploading" ? "投稿中" : "已投稿"}
+                {job && job.status !== "success" && job.status !== "failed"
+                  ? "投稿中" : "已投稿"}
               </span>
             )}
           </div>
@@ -1918,7 +1945,7 @@ function DelPop(p: {
 }
 
 // ---------------------------------------------------------------------------
-// v2.0.0 投稿气泡（biliup：表单 + 封面预览 + 提交轮询）
+// v2.3.0 投稿抽屉（v2.0.0 投稿气泡改抽屉：内容放不下合集/分P 表单）
 // ---------------------------------------------------------------------------
 const TID_OPTIONS: [number, string][] = [
   [4, "游戏"], [171, "电子竞技"], [172, "手机游戏"], [65, "网络游戏"],
@@ -1926,24 +1953,74 @@ const TID_OPTIONS: [number, string][] = [
   [188, "科技"], [234, "运动"], [1, "动画"], [181, "影视"],
 ];
 
-function SubmitPop(p: {
-  anchor: HTMLElement | null;
+interface SeasonSec { id: number; title: string; ep_count: number }
+interface Season { season_id: number; title: string; ep_total: number; sections: SeasonSec[] }
+interface Arc { aid: number; bvid: string; title: string }
+interface ArcPart { cid: number; index: number; title: string }
+interface Targets {
+  account: { ok: boolean; uname: string; mid: number; face: string };
+  seasons: Season[];
+  arcs: Arc[];
+}
+
+// 记住上次的合集选择（该主播所有视频进同一合集 → 每次预选）
+const SUB_SEASON_KEY = "replay-sub-season";
+
+function SubmitDrawer(p: {
   entry: Entry | null;
   ROOM: number;
   onClose: () => void;
-  onJob: (clipId: number, job: { id: string; status: string; bv: string; error: string }) => void;
+  onJob: (clipId: number, job: { id: string; status: string; bv: string; error: string; mode?: string }) => void;
 }) {
   const e = p.entry;
+  const [open, setOpen] = useState(false);   // 挂载后下一帧翻开（滑入动画）
+  const [mode, setMode] = useState<"new" | "part">("new");
+  // new 模式表单（v2.0.0 原字段全保留）
   const [title, setTitle] = useState(e?.title || "");
   const [desc, setDesc] = useState("");
   const [tags, setTags] = useState("");
   const [tid, setTid] = useState(171);
   const [sourceType, setSourceType] = useState<"original" | "reprint">("original");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [cover, setCover] = useState<string>("");   // data URL
+  const [cover, setCover] = useState<string>("");   // data URL / blob URL
   const [coverAvail, setCoverAvail] = useState(false);
+  // 合集（v2.3.0）：0 = 不加入
+  const [seasonId, setSeasonId] = useState(0);
+  const [sectionId, setSectionId] = useState(0);
+  // part 模式（v2.3.0）
+  const [arcAid, setArcAid] = useState(0);
+  const [arcFilter, setArcFilter] = useState("");
+  const [parts, setParts] = useState<ArcPart[] | null>(null);
+  const [partTitle, setPartTitle] = useState(e?.title || "");
+  // 目标数据（账号合集/稿件）与提交态
+  const [targets, setTargets] = useState<Targets | null>(null);
+  const [tgtErr, setTgtErr] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const t = requestAnimationFrame(() => setOpen(true));
+    return () => cancelAnimationFrame(t);
+  }, []);
+
+  const loadTargets = useCallback(async () => {
+    setTgtErr("");
+    try {
+      const d = await api<Targets>("/api/submit/targets");
+      setTargets(d);
+      // 回填上次选择的合集（仍存在才生效；小节优先记忆值，缺失回第一节）
+      const saved = localStorage.getItem(SUB_SEASON_KEY) || "";
+      const [sid, sec] = (saved.split(":").map(Number) as number[]);
+      const s = d.seasons.find((x) => x.season_id === sid);
+      if (s) {
+        setSeasonId(s.season_id);
+        setSectionId(s.sections.some((x) => x.id === sec)
+          ? sec : s.sections[0]?.id || 0);
+      }
+    } catch (err: any) {
+      setTgtErr(err.message || "账号数据加载失败");
+    }
+  }, []);
 
   useEffect(() => {
     if (!e || e.isFullRec || e.etype !== "clip") return;
@@ -1953,8 +2030,20 @@ function SubmitPop(p: {
       .then((b) => setCover(URL.createObjectURL(b)))
       .then(() => setCoverAvail(true))
       .catch(() => setCoverAvail(false));
+    loadTargets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [e?.id]);
+
+  // 选中目标稿件 → 拉现有分P（命名查重确认）
+  useEffect(() => {
+    if (mode !== "part" || !arcAid) { setParts(null); return; }
+    let dead = false;
+    api<{ parts: ArcPart[] }>(`/api/submit/arcs/${arcAid}/parts`)
+      .then((d) => { if (!dead) setParts(d.parts); })
+      .catch(() => { if (!dead) setParts(null); });
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, arcAid]);
 
   function pickCover(ev: React.ChangeEvent<HTMLInputElement>) {
     const f = ev.target.files?.[0];
@@ -1967,20 +2056,36 @@ function SubmitPop(p: {
     rd.readAsDataURL(f);
   }
 
+  function pickSeason(sid: number) {
+    setSeasonId(sid);
+    const s = (targets?.seasons || []).find((x) => x.season_id === sid);
+    setSectionId(s?.sections[0]?.id || 0);
+  }
+
   async function submit() {
     if (!e || busy) return;
+    if (mode === "part" && !arcAid) { toast("请先选择目标稿件", "err"); return; }
+    if (mode === "part" && !partTitle.trim()) { toast("分P名不能为空", "err"); return; }
     setBusy(true);
     try {
+      const body = mode === "part"
+        ? { mode: "part", target_vid: String(arcAid), part_title: partTitle.trim() }
+        : {
+            mode: "new", title: title.trim(), desc, tags, tid,
+            source_type: sourceType,
+            source_url: sourceUrl.trim(),
+            cover_b64: cover.startsWith("data:") ? cover : "",
+            season_id: seasonId || null,
+            section_id: seasonId ? (sectionId || null) : null,
+          };
       const r = await postJson<{ job: string }>(
-        `/api/rooms/${p.ROOM}/clips/${e.id}/submit`,
-        {
-          title: title.trim(), desc, tags, tid,
-          source_type: sourceType,
-          source_url: sourceUrl.trim(),
-          cover_b64: cover.startsWith("data:") ? cover : "",
-        });
-      p.onJob(e.id, { id: r.job, status: "uploading", bv: "", error: "" });
-      toast("投稿任务已提交（上传中，3Mbps 上行大文件需数分钟）", "busy");
+        `/api/rooms/${p.ROOM}/clips/${e.id}/submit`, body);
+      if (mode === "new" && seasonId)
+        localStorage.setItem(SUB_SEASON_KEY, `${seasonId}:${sectionId}`);
+      p.onJob(e.id, { id: r.job, status: "uploading", bv: "", error: "", mode });
+      toast(mode === "part"
+        ? "已加入投稿队列（本地投稿器在线将自动接管上传；否则服务器兜底串行上传）"
+        : "投稿任务已提交（上传中，3Mbps 上行大文件需数分钟）", "busy");
       p.onClose();
     } catch (err: any) {
       toast(err.message, "err");
@@ -1990,52 +2095,169 @@ function SubmitPop(p: {
 
   if (!e) return null;
   const sizeMB = (e.fileSize || 0) / 1e6;
+  const arcs = (targets?.arcs || []).filter((a) => {
+    const q = arcFilter.trim();
+    return !q || a.title.includes(q) || a.bvid.includes(q);
+  });
+  const curSeason = (targets?.seasons || []).find((s) => s.season_id === seasonId) || null;
+  const dupPart = !!parts?.some((x) => x.title === partTitle.trim());
+
   return (
-    <Pop anchor={p.anchor} onClose={p.onClose} width={330}>
-      <div className="cap">投稿到 B 站 · {entryName(e)}（{sizeMB.toFixed(1)} MB，预计 {Math.max(1, Math.round(sizeMB / 22 / 0.375))} 分钟）</div>
-      <div className="sub-cover">
-        {cover ? <img src={cover} alt="封面预览" /> : coverAvail === false ? "本机已释放，可上传自定义封面" : "封面生成中…"}
-        <div className="cover-ops">
-          <button className="btn sm" onClick={() => fileRef.current?.click()}>换图</button>
+    <aside className={"rp-drawer sub-drawer" + (open ? " open" : "")} data-clip={e.id}>
+      <div className="dw-head">
+        <div className="tt">
+          <div className="dw-cap">投稿到 B 站</div>
+          <div className="dw-sub">
+            {entryName(e)} · {sizeMB.toFixed(1)} MB · 预计{" "}
+            {Math.max(1, Math.round(sizeMB / 22 / 0.375))} 分钟
+            {targets ? ` · 账号 ${targets.account.uname}` : ""}
+          </div>
         </div>
-        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
-               onChange={pickCover} />
+        <button className="btn sm" onClick={p.onClose}>收起 ›</button>
       </div>
-      <div className="sub-form-row">
-        <input type="text" placeholder="标题（空=切片名）" maxLength={80}
-               value={title} onChange={(ev) => setTitle(ev.target.value)} />
-        <textarea rows={2} placeholder="简介" maxLength={2000}
-                  style={{ resize: "vertical" }}
-                  value={desc} onChange={(ev) => setDesc(ev.target.value)} />
-        <div className="sub-row2">
-          <select value={tid} onChange={(ev) => setTid(+ev.target.value)}>
-            {TID_OPTIONS.map(([v, label]) => (
-              <option key={v} value={v}>{label}</option>
-            ))}
-          </select>
-          <select value={sourceType}
-                  onChange={(ev) => setSourceType(ev.target.value as any)}>
-            <option value="original">自制</option>
-            <option value="reprint">转载</option>
-          </select>
-        </div>
-        <input type="text" placeholder="标签（逗号分隔，最多 10 个）"
-               value={tags} onChange={(ev) => setTags(ev.target.value)} />
-        {sourceType === "reprint" && (
-          <input type="text" placeholder="转载来源（必填）"
-                 value={sourceUrl} onChange={(ev) => setSourceUrl(ev.target.value)} />
+      <div className="dw-body">
+        {tgtErr && (
+          <div className="sub-warn">
+            账号数据加载失败：{tgtErr}
+            <button className="btn sm" onClick={() => void loadTargets()}>重试</button>
+          </div>
         )}
+
+        {/* 模式切换：新视频（完整表单）/ 追加分P（只管目标与分P名） */}
+        <div className="sub-mode-tabs" role="tablist">
+          <button className={mode === "new" ? "on" : ""}
+                  onClick={() => setMode("new")}>新视频投稿</button>
+          <button className={mode === "part" ? "on" : ""}
+                  onClick={() => setMode("part")}>追加为分P</button>
+        </div>
+
+        {mode === "new" ? (
+          <>
+            <div className="sub-cover">
+              {cover
+                ? <img src={cover} alt="封面预览" />
+                : coverAvail === false ? "本机已释放，可上传自定义封面" : "封面生成中…"}
+              <div className="cover-ops">
+                <button className="btn sm" onClick={() => fileRef.current?.click()}>换图</button>
+              </div>
+              <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+                     onChange={pickCover} />
+            </div>
+            <div className="sub-form">
+              <input type="text" placeholder="标题（空=切片名）" maxLength={80}
+                     value={title} onChange={(ev) => setTitle(ev.target.value)} />
+              <textarea rows={2} placeholder="简介" maxLength={2000}
+                        style={{ resize: "vertical" }}
+                        value={desc} onChange={(ev) => setDesc(ev.target.value)} />
+              <div className="sub-row2">
+                <select value={tid} onChange={(ev) => setTid(+ev.target.value)}>
+                  {TID_OPTIONS.map(([v, label]) => (
+                    <option key={v} value={v}>{label}</option>
+                  ))}
+                </select>
+                <select value={sourceType}
+                        onChange={(ev) => setSourceType(ev.target.value as any)}>
+                  <option value="original">自制</option>
+                  <option value="reprint">转载</option>
+                </select>
+              </div>
+              <input type="text" placeholder="标签（逗号分隔，最多 10 个）"
+                     value={tags} onChange={(ev) => setTags(ev.target.value)} />
+              {sourceType === "reprint" && (
+                <input type="text" placeholder="转载来源（必填）"
+                       value={sourceUrl} onChange={(ev) => setSourceUrl(ev.target.value)} />
+              )}
+              <div className="sub-season">
+                <span className="lab">加入合集</span>
+                <select value={seasonId} onChange={(ev) => pickSeason(+ev.target.value)}>
+                  <option value={0}>不加入</option>
+                  {(targets?.seasons || []).map((s) => (
+                    <option key={s.season_id} value={s.season_id}>
+                      {s.title}（{s.ep_total} 集）
+                    </option>
+                  ))}
+                </select>
+                {curSeason && curSeason.sections.length > 1 && (
+                  <select value={sectionId}
+                          onChange={(ev) => setSectionId(+ev.target.value)}>
+                    {curSeason.sections.map((x) => (
+                      <option key={x.id} value={x.id}>
+                        {x.title}（{x.ep_count}）
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {targets && targets.seasons.length === 0 && (
+                  <span className="sub-hint">账号暂无合集（在 B 站创作中心创建后此处可选择）</span>
+                )}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="sub-form">
+            <div className="sub-season">
+              <span className="lab">目标稿件</span>
+              <input type="text" placeholder="搜索标题 / BV 号"
+                     value={arcFilter} onChange={(ev) => setArcFilter(ev.target.value)} />
+              <select value={arcAid} onChange={(ev) => setArcAid(+ev.target.value)}>
+                <option value={0}>选择要追加分P的稿件…</option>
+                {arcs.map((a) => (
+                  <option key={a.aid} value={a.aid}>
+                    {a.title} · {a.bvid}
+                  </option>
+                ))}
+              </select>
+              {targets && targets.arcs.length === 0 && (
+                <span className="sub-hint">账号还没有投稿稿件</span>
+              )}
+            </div>
+            {arcAid > 0 && (
+              <div className="sub-parts">
+                <div className="cap">
+                  现有分P {parts === null ? "加载中…" : `（${parts.length} 个）`}
+                </div>
+                {parts?.map((pt) => (
+                  <div className={"pt-row" + (pt.title === partTitle.trim() ? " dup" : "")}
+                       key={pt.cid}>
+                    <span className="idx">#{pt.index}</span>
+                    <span className="t">{pt.title}</span>
+                  </div>
+                ))}
+                {dupPart && (
+                  <div className="sub-warn">已有同名分P，继续提交将出现重复分P</div>
+                )}
+              </div>
+            )}
+            <div className="sub-part-name">
+              <span className="lab">分P名</span>
+              <input type="text" maxLength={80} value={partTitle}
+                     placeholder="分P名（默认切片名）"
+                     onChange={(ev) => setPartTitle(ev.target.value)} />
+              <span className="sub-hint">= 上传文件名；切片名改动后此处同步修改即可</span>
+            </div>
+          </div>
+        )}
+
+        <div className="ops">
+          <button className="btn sm primary" disabled={busy} onClick={submit}>
+            {busy ? "提交中…" : mode === "part" ? "追加分P" : "投稿"}
+          </button>
+          <button className="btn sm" onClick={p.onClose}>取消</button>
+        </div>
+        <div className="note-line">
+          {mode === "part"
+            ? "分P标题取上传文件名（后端已按此命名）；原稿标题/简介/封面保持不变。"
+            : "弹幕不随投稿（B 站不吃外挂字幕）；投稿账号由管理员配置。"}
+        </div>
+        <div className="sub-tip">
+          <span className="cap">使用提示</span>
+          提交后由本机投稿器接管上传（家庭宽带快路径）；投稿器未运行时，
+          25 秒后服务器兜底上传（3Mbps，大文件约 10 分钟/个）。本机启动
+          方式：双击项目根目录 submit_worker.bat（首次填一次管理员账号，
+          之后自动记忆）。
+        </div>
       </div>
-      <div className="ops">
-        <button className="btn sm primary" disabled={busy} onClick={submit}>
-          {busy ? "提交中…" : "投稿"}
-        </button>
-        <button className="btn sm" onClick={p.onClose}>取消</button>
-      </div>
-      <div className="note-line">
-        弹幕不随投稿（B 站不吃外挂字幕）；投稿账号由管理员配置。
-      </div>
-    </Pop>
+    </aside>
   );
 }
 

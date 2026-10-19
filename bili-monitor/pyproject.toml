@@ -7,6 +7,7 @@ dependencies = [
     # add_room 校验的 B站 HTTP API 匿名会话（web/bili_api.py）
     "aiohttp>=3.9.5",
     "fastapi>=0.141.1",
+    "jieba>=0.42.1",
     "jinja2>=3.1.6",
     "uvicorn>=0.52.4",
     "websockets>=17.2",

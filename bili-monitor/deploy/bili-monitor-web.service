@@ -14,11 +14,12 @@ ExecStart=/opt/bili-monitor/.venv/bin/uvicorn bili_monitor.web.app:app \
     --host 127.0.0.1 --port 8001
 Restart=always
 RestartSec=10
-# 500M：web 进程本身 ~80M + 转码线程拉起的 ffmpeg（1080p→480p 单线程
-# x264 峰值 ~250-300M）。200M 会让 ffmpeg 撞 cgroup 上限被 OOM 杀死，
-# systemd 判定单元 oom-kill 快速重启再重试转码——2026-10-08 曾形成
-# 13 秒一轮、持续 13 小时的崩溃循环（重启 3000+ 次），见版本笔记 v1.4.0。
-MemoryMax=250M
+# 400M：web 进程本身 ~80M + v2.3.4 弹幕词云的 jieba 词典常驻 ~60-80M
+#（分词峰值另计，单场 4.8 万条约 +30M 瞬时）。历史口径：v1.4 时代 500M
+# 是为进程内 ffmpeg 转码留的（1080p→480p 单线程 x264 峰值 ~250-300M，
+# 200M 曾致 13 秒一轮持续 13 小时的 OOM 崩溃循环）；v2.2 转码管线迁
+# replay 后降 250M，v2.3.4 词云上调至 400M。
+MemoryMax=400M
 
 [Install]
 WantedBy=multi-user.target

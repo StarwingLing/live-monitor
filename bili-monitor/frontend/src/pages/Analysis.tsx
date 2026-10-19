@@ -1,13 +1,17 @@
-// 数据分析页：主播下拉 + 概览指标 + 综合数据（问答）+ 留存（对照窗口
-// 3/7/30/90 可切）+ 活跃度 + 营收构成（径向双层饼图）+ 弹幕趋势占位（后续
-// 版本接入）。
-import { useCallback, useEffect, useState } from "react";
+// 数据分析页：主播筛选条（头像瓦片网格，v2.5.1 替换原下拉）+ 概览指标 +
+// 综合数据（问答）+ 留存（对照窗口 3/7/30/90 可切）+ 活跃度 + 营收构成
+// （径向双层饼图）+ 弹幕趋势占位（后续版本接入）。
+// v2.5.1 骨架屏：切换主播/统计窗口时五板块立即全量置骨架，加载链按页面
+// 自上而下顺序串行请求、逐块即时替换（慢服务器下顶部数据优先呈现，且
+// 串行不打满 2 核小机的带宽与 CPU；原实现 Promise.all 并发五查、全部
+// 到齐才一次性换装，页面长时间停在旧主播数据上）。
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { esc, fmtNum, toast } from "../ui";
+import { avatarGradient, esc, fmtNum, toast } from "../ui";
 import { useChart, TOOLTIP_THEME } from "../chart";
 import type { EChartsOption } from "../echarts";
 
-interface Room { room_id: number; anchor_name: string }
+interface Room { room_id: number; anchor_name: string; avatar_url: string }
 interface Overview {
   session_count: number; total_hours: number; danmaku_count: number;
   gift_value: number; danmaku_per_session: number; gift_per_session: number;
@@ -128,10 +132,18 @@ export default function Analysis() {
   const [days, setDays] = useState(30);
   const [retRefDays, setRetRefDays] = useState(30);
   const [ov, setOv] = useState<Overview | null>(null);
-  const [qa, setQa] = useState<QaItem[]>([]);
+  // qa 用 null/[]/有值 三态：null=加载中（骨架）、[]=已加载但无数据
+  const [qa, setQa] = useState<QaItem[] | null>(null);
   const [ret, setRet] = useState<RetResp | null>(null);
   const [act, setAct] = useState<ActResp | null>(null);
   const [rev, setRev] = useState<RevResp | null>(null);
+  // 主链中加载失败的板块 key（渲染「加载失败」而非永久骨架；下次切换自动重试）
+  const [failed, setFailed] = useState<Set<string>>(new Set());
+  // 加载链代号：快速连续切换主播/窗口时，旧链的迟到响应按代号丢弃
+  const genRef = useRef(0);
+  // 「本次 retRefDays 变化由天数窗口联动引起」标记：天数 tab 同时改
+  // days+retRefDays，主链会带新值重拉留存，留存单拉效应跳过本次
+  const daysChangedRef = useRef(true);
 
   useEffect(() => {
     api<Room[]>("/api/rooms").then((rs) => {
@@ -141,26 +153,56 @@ export default function Analysis() {
     }).catch((e) => toast("加载失败: " + e.message));
   }, []);
 
-  const loadAll = useCallback(async () => {
-    if (!room) return;
-    const base = `/api/rooms/${room}/analysis`;
-    const [o, r, a, q, v] = await Promise.all([
-      api<Overview>(`${base}/overview?days=${days}`),
-      api<RetResp>(`${base}/retention?days=${days}&ref_days=${retRefDays}`),
-      api<ActResp>(`${base}/activity?days=${days}`),
-      api<{ items: QaItem[] }>(`${base}/qa?days=${days}`),
-      api<RevResp>(`${base}/revenue?days=${days}`),
-    ]);
-    setOv(o);
-    setRet(r);
-    setAct(a);
-    setQa(q.items);
-    setRev(v);
-  }, [room, days, retRefDays]);
-
+  // 主加载链（v2.5.1 骨架屏配套）：切换主播/统计窗口 → 五板块全部置加载态
+  // （渲染骨架屏）→ 按【页面自上而下】顺序逐个请求、逐个即时替换。串行而非
+  // 并发：顶部数据优先落位，且小规格服务器（2C/1.7G、3Mbps 出向）不被五个
+  // 重查询同时打满。任一环节失败 toast 并标记该板块（显示「加载失败」），
+  // 继续下一环节，不阻塞其余板块。
   useEffect(() => {
-    loadAll().catch((e) => toast("加载失败: " + e.message));
-  }, [loadAll]);
+    if (!room) return;
+    const g = ++genRef.current;
+    daysChangedRef.current = true; // 本轮 days 可能联动改了 retRefDays，留存单拉跳过
+    setOv(null); setRet(null); setAct(null); setQa(null); setRev(null);
+    setFailed(new Set());
+    const base = `/api/rooms/${room}/analysis`;
+    const steps: [string, () => Promise<void>][] = [
+      ["ov", async () =>
+        setOv(await api<Overview>(`${base}/overview?days=${days}`))],
+      ["qa", async () =>
+        setQa((await api<{ items: QaItem[] }>(`${base}/qa?days=${days}`)).items)],
+      ["ret", async () =>
+        setRet(await api<RetResp>(`${base}/retention?days=${days}&ref_days=${retRefDays}`))],
+      ["act", async () =>
+        setAct(await api<ActResp>(`${base}/activity?days=${days}`))],
+      ["rev", async () =>
+        setRev(await api<RevResp>(`${base}/revenue?days=${days}`))],
+    ];
+    (async () => {
+      for (const [key, step] of steps) {
+        if (genRef.current !== g) return; // 已切走：旧链静默终止
+        try {
+          await step();
+        } catch (e: any) {
+          if (genRef.current !== g) return;
+          toast("加载失败: " + e.message);
+          setFailed((f) => new Set(f).add(key));
+        }
+      }
+    })();
+    // retRefDays 不入依赖：单独切换对照窗口由下方独立效应处理（只换留存
+    // 一块，其余板块保留真实数据，不整页回骨架）
+  }, [room, days]);
+
+  // 留存对照窗口单独切换（3/7/30/90日）：仅重拉留存一块，旧图保留到新数据
+  // 到达（快查不闪骨架）；随天数 tab 联动的变化已被 daysChangedRef 跳过
+  useEffect(() => {
+    if (daysChangedRef.current) { daysChangedRef.current = false; return; }
+    if (!room) return;
+    const g = genRef.current;
+    api<RetResp>(`/api/rooms/${room}/analysis/retention?days=${days}&ref_days=${retRefDays}`)
+      .then((r) => { if (genRef.current === g) setRet(r); })
+      .catch((e) => toast("加载失败: " + e.message));
+  }, [retRefDays]);
 
   // 留存图（嵌套类目轴 [日期, 时刻]）
   // retTips 与 cats 逐位对齐：无直播的日期同样占一位（null），否则空日期
@@ -248,11 +290,55 @@ export default function Analysis() {
   const revRows: RevUser[] = rev
     ? (rev.others ? [...rev.items, { ...rev.others, uid: -1 }] : [...rev.items])
     : [];
+  // 营收饼图（v2.5.1 悬浮动画）：命中的扇形 sector 沿本片角平分线把所属
+  // group 再外滑 5px、离开滑回，cubicInOut 缓入缓出约 200ms。zrender 层
+  // 直接动画（custom series 无声明式 emphasis 位移，context7 已核对
+  // zr.on 命中 e.target / animate().when().start('cubicInOut') 用法）；
+  // 爆炸基座位移已烘焙在扇形 cx/cy 里，group 自身 x/y 静息恒为 0，
+  // 动画即在 0↔5px 间往返，无需记录回弹目标。悬浮命中「其他」灰片等
+  // uid<0 片同样生效（同为普通 group）。
   const revRef = useChart(
-    rev && rev.total.value > 0 ? revOption(rev, revRows) : null);
+    rev && rev.total.value > 0 ? revOption(rev, revRows) : null,
+    (chart) => {
+      const zr = chart.getZr();
+      // 位移上限说明：扇形外缘画在 R0=min(w,h)/2-12 的圆周上（画布边距
+      // 12px，基座爆炸 3px 已在半径里补偿），悬浮位移再往外推——15px 会
+      // 越出边距被裁切（服务器实测），5px 留有余量
+      const HOVER = 5, DUR = 200;
+      let last: any = null;   // 最近外滑的 group（globalout 兜底复位）
+      const slide = (g: any, out: boolean, mid: number) => {
+        g.stopAnimation?.();
+        g.animate("", false)
+          .when(DUR, out ? { x: HOVER * Math.cos(mid), y: HOVER * Math.sin(mid) }
+                         : { x: 0, y: 0 })
+          .start("cubicInOut");
+      };
+      // 命中的必须是扇形（shape 带 startAngle/endAngle），其 parent 为
+      // renderItem 返回的每片 group；tooltip 文本等其他图元直接忽略
+      const groupOf = (t: any) =>
+        t && t.parent && t.parent.type === "group" &&
+        t.shape && typeof t.shape.startAngle === "number" ? t.parent : null;
+      zr.on("mouseover", (e: any) => {
+        const g = groupOf(e.target);
+        if (g) {
+          const s = e.target.shape;
+          slide(g, true, (s.startAngle + s.endAngle) / 2);
+          last = g;
+        }
+      });
+      zr.on("mouseout", (e: any) => {
+        const g = groupOf(e.target);
+        if (g) slide(g, false, 0);
+      });
+      zr.on("globalout", () => {
+        if (last) { slide(last, false, 0); last = null; }
+      });
+    });
 
+  // 五板块是否全部就位（aria-busy：加载中告知辅助技术页面仍在更新）
+  const busy = !(ov && qa !== null && ret && act && rev);
   return (
-    <>
+    <div aria-busy={busy}>
       <div className="page-head">
         <h2>数据分析</h2>
         <span className="sub">统计窗口：近 {days} 天</span>
@@ -265,53 +351,98 @@ export default function Analysis() {
         </div>
       </div>
 
+      {/* 主播筛选条：头像瓦片网格（参考 VLivePulse streamer-strip 布局）——
+          头像在上/名字省略号在下，选中=粉边+光环；替代原 <select> 下拉 */}
       <div className="card card-pad" style={{ marginBottom: 16 }}>
-        <div className="manage-form">
-          <select style={{ flex: 1, maxWidth: 320 }} value={room ?? ""}
-                  onChange={(e) => setRoom(+e.target.value || null)}>
-            {rooms.length === 0 && <option value="">暂无监控房间</option>}
-            {rooms.map((r) => (
-              <option key={r.room_id} value={r.room_id}>
-                {r.anchor_name || "未知名"}（{r.room_id}）
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="metrics">
-          {[
-            { k: "场次数", v: ov ? <>{ov.session_count}<small>场</small></> : "—" },
-            { k: "直播总时长", v: ov ? <>{ov.total_hours}<small>小时</small></> : "—" },
-            { k: "总弹幕", v: ov ? fmtNum(ov.danmaku_count) : "—" },
-            { k: "总营收", v: ov ? <>¥{ov.gift_value.toLocaleString()}</> : "—" },
-            { k: "场均弹幕", v: ov?.danmaku_per_session ?? "—" },
-            { k: "场均营收", v: ov ? <>¥{ov.gift_per_session}</> : "—" },
-            { k: "最高同接", v: ov ? fmtNum(ov.peak_viewers) : "—" },
-            { k: "活跃观众", v: ov ? fmtNum(ov.active_users) : "—" },
-          ].map((m, i) => (
-            <div className="metric" key={i}>
-              <div className="k">{m.k}</div>
-              <div className="v">{m.v}</div>
+        <div className="streamer-strip" aria-label="主播筛选">
+          {rooms.length === 0 && (
+            <div className="empty" style={{ padding: "18px 0", gridColumn: "1/-1" }}>
+              暂无监控房间，先去「直播间管理」添加
             </div>
+          )}
+          {rooms.map((r) => (
+            <button key={r.room_id}
+                    className={"streamer-tile" + (room === r.room_id ? " active" : "")}
+                    aria-pressed={room === r.room_id}
+                    title={`${r.anchor_name || "未知名"}（${r.room_id}）`}
+                    onClick={() => setRoom(r.room_id)}>
+              <span className="ava" style={{ background: avatarGradient(r.room_id) }}>
+                {r.avatar_url && (
+                  <img src={r.avatar_url} alt="" loading="lazy"
+                       onError={(e) => (e.target as HTMLImageElement).remove()} />
+                )}
+                {(r.anchor_name || "B")[0]}
+              </span>
+              <small>{r.anchor_name || "未知名"}</small>
+            </button>
           ))}
         </div>
       </div>
 
+      <div className="card card-pad">
+        {ov ? (
+          <div className="metrics">
+            {[
+              { k: "场次数", v: <>{ov.session_count}<small>场</small></> },
+              { k: "直播总时长", v: <>{ov.total_hours}<small>小时</small></> },
+              { k: "总弹幕", v: fmtNum(ov.danmaku_count) },
+              { k: "总营收", v: <>¥{ov.gift_value.toLocaleString()}</> },
+              { k: "场均弹幕", v: ov.danmaku_per_session },
+              { k: "场均营收", v: <>¥{ov.gift_per_session}</> },
+              { k: "最高同接", v: fmtNum(ov.peak_viewers) },
+              { k: "活跃观众", v: fmtNum(ov.active_users) },
+            ].map((m, i) => (
+              <div className="metric" key={i}>
+                <div className="k">{m.k}</div>
+                <div className="v">{m.v}</div>
+              </div>
+            ))}
+          </div>
+        ) : failed.has("ov") ? (
+          <div className="empty" style={{ padding: "24px 0" }}>概览数据加载失败</div>
+        ) : (
+          <div className="metrics">
+            {Array.from({ length: 8 }, (_, i) => (
+              <div className="metric" key={i}>
+                <div className="sk" style={{ width: "44%", height: 11 }} />
+                <div className="sk" style={{ width: "62%", height: 20, marginTop: 8 }} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="card card-pad" style={{ marginTop: 16 }}>
-        <h3>综合数据 <span className="more">共 {qa.length} 项</span></h3>
-        <div className="qa-grid">
-          {qa.length === 0 && (
-            <div className="empty" style={{ padding: "24px 0", gridColumn: "1/-1" }}>
-              该窗口暂无数据
+        <h3>综合数据 {qa !== null && <span className="more">共 {qa.length} 项</span>}</h3>
+        {qa === null ? (
+          failed.has("qa") ? (
+            <div className="empty" style={{ padding: "24px 0" }}>综合数据加载失败</div>
+          ) : (
+            <div className="qa-grid">
+              {Array.from({ length: 6 }, (_, i) => (
+                <div className="qa-item" key={i}>
+                  <div className="sk" style={{ width: "58%", height: 11 }} />
+                  <div className="sk" style={{ width: "38%", height: 20, marginTop: 8 }} />
+                  <div className="sk" style={{ width: "30%", height: 10, marginTop: 6 }} />
+                </div>
+              ))}
             </div>
-          )}
-          {qa.map((it, i) => (
-            <div className="qa-item" key={i}>
-              <div className="qa-q">{it.q}</div>
-              <div className="qa-a">{it.a}</div>
-              <div className="qa-sub">{it.sub}</div>
-            </div>
-          ))}
-        </div>
+          )
+        ) : qa.length === 0 ? (
+          <div className="empty" style={{ padding: "24px 0", gridColumn: "1/-1" }}>
+            该窗口暂无数据
+          </div>
+        ) : (
+          <div className="qa-grid">
+            {qa.map((it, i) => (
+              <div className="qa-item" key={i}>
+                <div className="qa-q">{it.q}</div>
+                <div className="qa-a">{it.a}</div>
+                <div className="qa-sub">{it.sub}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="detail-extras">
@@ -325,19 +456,45 @@ export default function Analysis() {
               ))}
             </span>
           </h3>
-          <div ref={retRef} className="chart-box" style={{ height: 300 }} />
-          <div className="chart-note">
-            每柱 = 一场直播（同日多场并列；无直播日留空）；留存率 = 与本场开播前
-            {retRefDays} 天内所有已结束场次观众并集的重合人数 ÷ 并集人数，
-            前 {retRefDays} 天无直播的场次不显示。
-          </div>
+          {ret === null ? (
+            failed.has("ret") ? (
+              <div className="empty" style={{ padding: "40px 0" }}>留存数据加载失败</div>
+            ) : (
+              <>
+                <div className="sk" style={{ height: 300, borderRadius: 10 }} />
+                <div className="sk" style={{ width: "72%", height: 11, marginTop: 9 }} />
+              </>
+            )
+          ) : (
+            <>
+              <div ref={retRef} className="chart-box" style={{ height: 300 }} />
+              <div className="chart-note">
+                每柱 = 一场直播（同日多场并列；无直播日留空）；留存率 = 与本场开播前
+                {retRefDays} 天内所有已结束场次观众并集的重合人数 ÷ 并集人数，
+                前 {retRefDays} 天无直播的场次不显示。
+              </div>
+            </>
+          )}
         </div>
         <div className="card card-pad">
           <h3>直播活跃度 <span className="more">任一互动人数 ÷ 同接</span></h3>
-          <div ref={actRef} className="chart-box" style={{ height: 300 }} />
-          <div className="chart-note">
-            按分钟统计"发弹幕/送礼/互动的去重人数 ÷ 同接人数"，取每场平均后再按日聚合（平均 / 最高）。
-          </div>
+          {act === null ? (
+            failed.has("act") ? (
+              <div className="empty" style={{ padding: "40px 0" }}>活跃度数据加载失败</div>
+            ) : (
+              <>
+                <div className="sk" style={{ height: 300, borderRadius: 10 }} />
+                <div className="sk" style={{ width: "58%", height: 11, marginTop: 9 }} />
+              </>
+            )
+          ) : (
+            <>
+              <div ref={actRef} className="chart-box" style={{ height: 300 }} />
+              <div className="chart-note">
+                按分钟统计"发弹幕/送礼/互动的去重人数 ÷ 同接人数"，取每场平均后再按日聚合（平均 / 最高）。
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -347,7 +504,24 @@ export default function Analysis() {
         </div>
         <div className="card card-pad">
           <h3>营收构成 <span className="more">前 10 用户 + 其他</span></h3>
-          {revRows.length === 0 ? (
+          {rev === null ? (
+            failed.has("rev") ? (
+              <div className="empty" style={{ padding: "40px 0" }}>营收数据加载失败</div>
+            ) : (
+              <div className="rev-wrap">
+                <div className="sk" style={{ flex: "1 1 56%", height: 264, borderRadius: 10 }} />
+                <div className="rev-legend">
+                  {Array.from({ length: 6 }, (_, i) => (
+                    <div className="rev-row" key={i}>
+                      <div className="sk" style={{ width: 9, height: 9, borderRadius: "50%", flex: "none" }} />
+                      <div className="sk" style={{ flex: 1, height: 12 }} />
+                      <div className="sk" style={{ width: 42, height: 12 }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          ) : revRows.length === 0 ? (
             <div className="empty" style={{ padding: "24px 0" }}>该窗口暂无营收数据</div>
           ) : (
             <div className="rev-wrap">
@@ -376,6 +550,6 @@ export default function Analysis() {
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }

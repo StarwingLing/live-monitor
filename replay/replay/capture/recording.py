@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """录制器：房间级 ffmpeg 分段录制（整场录制 / 直播截取 / 手动切片共用基建）。
 
-整场录制（replay 站手动触发或 auto_full 自动对账，qn=full_qn 默认 200）：
+整场录制（replay 站手动触发或 auto_full 自动对账，qn=full_qn 默认 10000
+原画——v2.4.0 起，见 config.py 注释）：
 全部分段保留，停止后 concat + remux 成单文件 mp4（-c copy 不转码，
 +faststart 让 moov 前置，浏览器可拖动播放）。v2.1 起 2 小时自动分段轮换
 + 桥接片；v2.2 高能时刻移除，qn=80 滚动缓冲流随之退役（直播截取与打点
@@ -70,10 +71,11 @@ def _extract_playurl(playurl_info: dict | None) -> tuple[str, int] | None:
     """从 playurl_info 结构里挑最佳直链，返回 (url, current_qn)。
 
     结构（宽松解析，字段缺失即返回 None 让调用方降级下一层）：
-    playurl_info.playurl.stream[] → 每项 protocol_name（flv / hls_fmp4 / fmp4）
-    → format[] → codec[]（codec_name avc/hevc；url_info[] 每项
-    {host, base_url, extra}，三者字符串直接拼接即完整 URL）。
-    优先 flv（单条流，ffmpeg 直接拉），其次 hls_fmp4（ffmpeg 也能拉）。
+    playurl_info.playurl.stream[] → 每项 protocol_name（flv / hls_fmp4 /
+    hls / http_hls / fmp4）→ format[] → codec[]（codec_name avc/hevc；
+    url_info[] 每项 {host, base_url, extra}，三者字符串直接拼接即完整 URL）。
+    优先 flv（单条流，ffmpeg 直接拉），其次 hls 系（含 http_hls——
+    v2.3.1 起白名单，延迟直播只发 http_hls，见 fetch_playurl）。
     """
     try:
         streams = (((playurl_info or {}).get("playurl") or {}).get("stream")) or []
@@ -82,7 +84,7 @@ def _extract_playurl(playurl_info: dict | None) -> tuple[str, int] | None:
             proto = (st.get("protocol_name") or "").lower()
             if proto == "flv":
                 prio = 0
-            elif proto in ("hls_fmp4", "hls"):
+            elif proto in ("hls_fmp4", "hls", "http_hls"):
                 prio = 1
             elif proto == "fmp4":
                 prio = 2
@@ -110,24 +112,34 @@ async def fetch_playurl(session: aiohttp.ClientSession, room_id: int,
     直链带鉴权 token、时效短（分钟级），因此每次启动/断流重启都重新
     获取，绝不缓存复用。三层全部失败抛 RuntimeError（调用方决定置
     failed 还是交给 watcher 重试）。
+
+    第一层 getRoomPlayInfo 按 flv（protocol=0）→ hls（protocol=1）
+    两遍参数请求：延迟直播（主播开 300s 延迟档）下 flv 参数不发放任何
+    直链（code=0 但 playurl 为空），hls 参数仍发放 http_hls 流——
+    2026-10-19 某主播 300s 延迟场 70 分钟 138 条 failed 实证。flv 优先
+    （单条流、分段录制最简），拿不到再问 hls，两层都空才降级下一层。
     """
-    last_err = ""
+    errs: list[str] = []
     # ① getRoomPlayInfo（v2）
-    try:
-        async with session.get(
-                PLAYINFO_API,
-                params={"room_id": room_id, "protocol": 0, "format": 2, "codec": 0,
-                        "qn": qn, "platform": "web", "ptype": 16, "dolby": 5,
-                        "panorama": 1},
-                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json(content_type=None)
-        if data.get("code") == 0:
-            got = _extract_playurl((data.get("data") or {}).get("playurl_info"))
-            if got:
-                return got
-        last_err = f"getRoomPlayInfo code={data.get('code')}"
-    except Exception as e:
-        last_err = f"getRoomPlayInfo {e!r}"
+    for proto in (0, 1):
+        try:
+            async with session.get(
+                    PLAYINFO_API,
+                    params={"room_id": room_id, "protocol": proto,
+                            "format": 2, "codec": 0, "qn": qn,
+                            "platform": "web", "ptype": 16, "dolby": 5,
+                            "panorama": 1},
+                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json(content_type=None)
+            if data.get("code") == 0:
+                got = _extract_playurl(
+                    (data.get("data") or {}).get("playurl_info"))
+                if got:
+                    return got
+            errs.append(f"getRoomPlayInfo(protocol={proto}) "
+                        f"code={data.get('code')}")
+        except Exception as e:
+            errs.append(f"getRoomPlayInfo(protocol={proto}) {e!r}")
     # ② 老版 playUrl
     try:
         async with session.get(
@@ -142,9 +154,9 @@ async def fetch_playurl(session: aiohttp.ClientSession, room_id: int,
             if durl and durl[0].get("url"):
                 cur_qn = int((data.get("data") or {}).get("current_qn") or 0)
                 return durl[0]["url"], cur_qn
-        last_err = f"playUrl code={data.get('code')}"
+        errs.append(f"playUrl code={data.get('code')}")
     except Exception as e:
-        last_err = f"playUrl {e!r}"
+        errs.append(f"playUrl {e!r}")
     # ③ getInfoByRoom（响应自带 playurl_info）
     try:
         async with session.get(
@@ -155,10 +167,13 @@ async def fetch_playurl(session: aiohttp.ClientSession, room_id: int,
             got = _extract_playurl((data.get("data") or {}).get("playurl_info"))
             if got:
                 return got
-        last_err = f"getInfoByRoom code={data.get('code')}"
+        errs.append(f"getInfoByRoom code={data.get('code')}")
     except Exception as e:
-        last_err = f"getInfoByRoom {e!r}"
-    raise RuntimeError(f"房间{room_id} 三层拉流接口均失败：{last_err}")
+        errs.append(f"getInfoByRoom {e!r}")
+    # 每层结果全量入报错文案（旧实现只留最后一层，2026-10-19 延迟直播
+    # 事故的 reason 只剩「getInfoByRoom code=0」，掩盖了 flv 同为空的
+    # 关键线索；逐层累积后 reason 一列即可定位）
+    raise RuntimeError(f"房间{room_id} 三层拉流接口均失败：{'；'.join(errs)}")
 
 
 # ffmpeg 拉流请求头：B 站直播 CDN 校验 User-Agent（ffmpeg 默认 Lavf UA
@@ -647,7 +662,8 @@ class Recorder:
 
         qn：本次录制画质。缺省回退 full_qn（手动按钮页路径）；v0.11 起
         调用方（_scan_recordings）传 recordings.qn 列——行插入时已按来源
-        定好（web 手动=full_qn 200 / capture 自动对账=auto_full_qn 150）。
+        定好（web 手动=full_qn 10000 / capture 自动对账=auto_full_qn
+        10000，均原画档）。
 
         幂等防线（第三道）：本 Recorder 已在录时拒绝新请求行（作废为
         failed）——绝不能二次进入：否则会覆盖 full_rec_id 上下文并

@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 模型缓存与分析产物（运行时生成，不入库）
+models/
+results/
+
+# 冒烟测试的临时合成媒体
+tests/_tmp/
+
+# 本地输出产物
+*.analysis.json
+*.analysis.md

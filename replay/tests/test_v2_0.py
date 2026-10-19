@@ -36,6 +36,9 @@ from fastapi.testclient import TestClient
 
 # ---- 生产模式 + 录像根 / 投稿临时区指向临时目录 ----
 app_mod.cfg["capture"]["admin_password"] = "test-admin-pw"
+# 存量缺陷修复（v2.3.0 顺带）：本地 config.toml 自 v2.2.5 起 recording
+# .enabled=false，起录端点 400——测试须自带开关状态，不随本地配置漂移
+app_mod.cfg["recording"]["enabled"] = True
 app_mod.RECORDINGS_ROOT = TMP / "recordings"
 app_mod.RECORDINGS_ROOT.mkdir(exist_ok=True)
 upload_mod.TMP_DIR = TMP / "tmp"
@@ -260,7 +263,9 @@ check("切片弹幕跨房 403", r.status_code == 403)
 # ===========================================================================
 # 4. 切片一键投稿（biliup 子进程 mock）
 # ===========================================================================
-# 4.1 未部署（本地默认无二进制）→ 503
+# 4.1 未部署 → 503（存量缺陷修复 v2.3.0 顺带：本地 config.toml 可能已配
+# biliup_bin（联调用），测试须自带部署状态，不随本地配置漂移）
+app_mod.cfg["bili"]["biliup_bin"] = ""
 clip_file = REC / "101" / "clip_sub" / "clip.mp4"
 clip_file.parent.mkdir(parents=True, exist_ok=True)
 clip_file.write_bytes(b"fake-mp4")
@@ -270,12 +275,18 @@ r = cp.post(f"/api/rooms/101/clips/{c_sub}/submit",
             json={"title": "测试投稿"}, headers=CLIPPER_101)
 check("投稿未部署（无 biliup 二进制）503", r.status_code == 503)
 
-# 4.2 部署态：假二进制 + 假 cookies（临时目录）+ mock 子进程
+# 4.2 部署态：假二进制 + 假 cookies（临时目录）+ mock 子进程。
+# v2.3.0：cookies 需为部署态结构（token_info.access_token 非空）——
+# 新视频投稿端点有 access_token 守卫（网页 cookie 缺 token 时 503）
+import json as _json
 app_mod.cfg["bili"]["biliup_bin"] = "fake-biliup"
 app_mod.cfg["bili"]["biliup_cookies"] = str(TMP / "biliup-cookies.json")
 _cookies = upload_mod.cookies_path()
 _cookies.parent.mkdir(parents=True, exist_ok=True)
-_cookies.write_text("{}")
+_cookies.write_text(_json.dumps({
+    "cookie_info": {"cookies": [{"name": "SESSDATA", "value": "s"},
+                                {"name": "bili_jct", "value": "j"}]},
+    "token_info": {"access_token": "fake-token"}}))
 
 CMD_SEEN: list[list[str]] = []
 

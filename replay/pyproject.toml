@@ -1,6 +1,6 @@
 [project]
 name = "replay"
-version = "2.2.4"
+version = "2.4.0"
 description = "B站直播录播回放站（v2.2 兼采集与存储管线：capture 子包 + 转码上云 + 三角色登录 + 监控码导航 + 管理页）"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
     # OSS 签名 URL 播放/下载（私有 bucket，本机释放后的通道）与删除联动
     # + v2.2 迁入的上传/归档/回灌管线；与 bili-monitor 同款 SDK
     "alibabacloud-oss-v2>=1.4.0",
+    "qrcode>=8.2",
 ]
 
 [[tool.uv.index]]

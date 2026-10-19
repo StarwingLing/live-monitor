@@ -9,18 +9,21 @@
 
 ```
 live-monitor/
-├── README.md            # 人类导览：架构总览/前置要求/部署总序/端口表
+├── README.md            # 人类导览：架构总览/外部配置集中清单/部署总序/端口表
 ├── AGENTS.md            # 本文件：AI 代理的操作指引
-├── replay/              # 数据属主：采集+录制+管线+回放站（先部署）
+├── replay/              # 数据属主：采集+录制+管线+投稿+回放站（先部署）
 │   ├── AGENTS.md        # 共享表 DDL 锁步/角色口径/重启数据保全规程
 │   ├── README.md        # 本地快速开始
 │   └── deploy/README.md # 服务器部署细节 + 验收清单
 ├── bili-monitor/        # 监控数据 web（后部署，db_path 指向 replay 库）
 │   ├── AGENTS.md        # 数据库依赖/前端适配约定
 │   └── tutorial/        # 01 构建思路 → 05 部署到服务器 → 06-08 功能章
-└── live-qq-notify/      # 可选：开播 QQ 群通知器
-    ├── AGENTS.md        # 双发送通道/关键红线
-    └── tutorial/        # 01-03（含 NapCat 部署运维）
+├── live-qq-notify/      # 可选：开播 QQ 群通知器（多机器人/官方+NapCat 双通道）
+│   ├── AGENTS.md        # 双发送通道/DDL 属主/关键红线
+│   └── tutorial/        # 01-03（含 NapCat 部署运维）
+└── song-detector/       # 可选：本地唱歌/音乐段落识别工具（不部署服务器）
+    ├── AGENTS.md        # 定位边界/模型缓存口径
+    └── 使用说明.md       # 环境准备/CLI/网页校对
 ```
 
 部署一个子项目前，先读它的 deploy 文档与 `config.example.toml` 注释——
@@ -28,16 +31,20 @@ live-monitor/
 
 ## 2. 核心不变量（任何操作都不得违反）
 
-1. **同级目录名不可改**：三个子项目必须以 `replay` / `bili-monitor` /
+1. **同级目录名不可改**：三个服务端子项目必须以 `replay` / `bili-monitor` /
    `live-qq-notify` 同级部署（默认相对路径 `../bili-monitor/data` 是
-   SSO 桥接与共享库的定位方式）；
+   SSO 桥接与共享库的定位方式）；`song-detector` 是纯本地工具，不部署
+   服务器、不读共享库；
 2. **只监听回环**：所有 Web 服务 `127.0.0.1:<端口>`，公网经 Nginx 反代；
    Nginx `proxy_pass` **不带末尾斜杠**（保留前缀，配套应用
    `root_path="/<前缀>"`，否则静态挂载 404）；
 3. **`config.toml` 与 `data/` 永不提交、永不跨环境覆盖**：服务器配置从
    `config.example.toml` 另写；同步代码时排除二者（`data/` 是运行数据）；
-4. **共享表 DDL 锁步**：改 `live.db` 共享表结构必须同版同步
-   `replay/replay/db.py` 与 `bili-monitor/bili_monitor/db.py` 及两侧测试；
+4. **共享表 DDL 锁步**：监控类表（danmaku/场次/快照/画像等）改结构须同版
+   同步 `replay/replay/db.py` 与 `bili-monitor/bili_monitor/db.py` 及两侧
+   测试；通知类表（qq_notify / qq_group_map / qq_bots 等）DDL 属主为
+   live-qq-notify（其 store.py），bili-monitor db.py 持锁步副本，改结构
+   须同版同步两侧；
 5. **端口约定**：8001 = bili-monitor、8003 = replay（8002 预留）；改动需
    同步改 systemd 单元、Nginx location、config 三处；
 6. **小内存口径**：MemoryMax 见根 README 端口表；转码 ffmpeg 计入
@@ -77,6 +84,8 @@ tar czf - --exclude .venv --exclude __pycache__ --exclude node_modules \
   | ssh -p <SSH端口> -i "<SSH私钥路径>" root@<服务器IP> \
       "mkdir -p /opt/replay && tar xzf - -C /opt/replay"
 # bili-monitor 同法，目标 /opt/bili-monitor；live-qq-notify 同法（可选）
+# song-detector 不部署服务器（本地工具）；投稿需 biliup-rs 二进制另装
+# （见 replay/deploy/README.md 第 9 章）
 ```
 
 ### 阶段 3 · 服务器配置（每项目 cp 模板后改）
@@ -118,9 +127,11 @@ curl -I http://127.0.0.1/replay/login                           # ④ 经 Nginx 
    密码）——首次启动自动生成，登录后到管理页改掉；
 2. **加房间**：bili-monitor 管理页（或 replay 管理页房间名单）添加
    直播间 ID，replay-capture 30s 内自动开始监控；
-3. **QQ 通知（可选）**：bili-monitor 管理页「开播账号管理」配置通道
-   （官方机器人 AppID/AppSecret 或 NapCat），live-qq-notify 需单独部署
-   （见其 tutorial/03，含 NapCat 版本钉死等运维红线）。
+3. **QQ 通知（可选）**：bili-monitor 管理页「机器人管理」配置通道
+   （官方机器人 AppID/AppSecret 或 NapCat；多机器人档案），live-qq-notify
+   需单独部署（见其 tutorial/03，含 NapCat 版本钉死等运维红线）；群内
+   @机器人未命中指令时可用「AI 智能回复」接 OpenAI 兼容大模型（可选）；
+   房间级通知开关/群映射/文案在总览页每个直播间的通知设置里配。
 
 ## 4. 常见运维速查
 

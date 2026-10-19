@@ -3,6 +3,10 @@ import react from "@vitejs/plugin-react";
 
 // 部署形态：Nginx 前缀反代 /bili-monitor/ → 127.0.0.1:8001（保留前缀，
 // 配合 FastAPI root_path=/bili-monitor）——生产 base 固定。
+// 后端 API 目标端口可用 BILI_API_PORT 覆盖（默认 8001）：8001 被另一调试
+// 实例占用时，可另起 uvicorn 于其他端口并行联调（v2.4.1 加入）。
+const API_TARGET = `http://127.0.0.1:${process.env.BILI_API_PORT || "8001"}`;
+
 export default defineConfig({
   base: "/bili-monitor/",
   plugins: [react()],
@@ -13,15 +17,15 @@ export default defineConfig({
       // 前缀——与生产 Nginx 前缀剥离的 proxy_pass 等价）；裸 /api 键保留
       // 供无 base 直连场景，两者互不冲突
       "/bili-monitor/api": {
-        target: "http://127.0.0.1:8001",
+        target: API_TARGET,
         rewrite: (p) => p.replace(/^\/bili-monitor/, ""),
       },
       "/bili-monitor/recordings": {
-        target: "http://127.0.0.1:8001",
+        target: API_TARGET,
         rewrite: (p) => p.replace(/^\/bili-monitor/, ""),
       },
-      "/api": "http://127.0.0.1:8001",
-      "/recordings": "http://127.0.0.1:8001",
+      "/api": API_TARGET,
+      "/recordings": API_TARGET,
     },
   },
   build: {

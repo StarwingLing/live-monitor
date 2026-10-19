@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// 部署形态（SERVER-INFO/AGENTS）：Nginx 前缀反代 /replay/ → 127.0.0.1:8003，
+// 部署形态：Nginx 前缀反代 /replay/ → 127.0.0.1:8003，
 // proxy_pass 不带尾斜杠保留前缀，配合 FastAPI root_path=/replay——因此
 // 生产构建 base 固定 '/replay/'（本地 dev 由 vite dev server 直出，base
 // 同样生效，API 经 proxy 转发到本地 uvicorn，root_path 为空串）。

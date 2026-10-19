@@ -1,0 +1,41 @@
+[project]
+name = "song-detector"
+version = "0.1.0"
+description = "本地视频/音频唱歌与音乐段落检测工具（YAMNet），供 replay 录播切片前定位歌曲位置"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.143.0",
+    "numpy>=2.5.4",
+    "setuptools<81",
+    "tensorflow>=2.21.0",
+    "tensorflow-hub>=0.16.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "pytest>=9.1.1",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+# 构建系统：让 uv 以可编辑方式安装本项目，
+# 从而 `uv run songdetector ...` 控制台命令在任意目录可用
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+songdetector = "songdetector.cli:main"
+
+# 项目名（song-detector）与包目录名（songdetector）不一致，需显式指定打包内容
+[tool.hatch.build.targets.wheel]
+packages = ["songdetector"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: 真模型端到端冒烟（首次运行需联网下载模型，或已手动放置模型缓存）",
+]

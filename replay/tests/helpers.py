@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS live_sessions (
     peak_popularity  INTEGER NOT NULL DEFAULT 0,
     peak_viewers     INTEGER NOT NULL DEFAULT 0,
     danmaku_count    INTEGER NOT NULL DEFAULT 0,
-    gift_value_yuan  REAL NOT NULL DEFAULT 0.0
+    gift_value_yuan  REAL NOT NULL DEFAULT 0.0,
+    cover_url        TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS danmaku (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +186,16 @@ CREATE TABLE IF NOT EXISTS manual_clip_notes (
     content      TEXT NOT NULL,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clip_submissions (
+    clip_id      INTEGER PRIMARY KEY,
+    bv           TEXT NOT NULL DEFAULT '',
+    mode         TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    submitted_at TEXT NOT NULL,
+    season_note  TEXT NOT NULL DEFAULT '',
+    alive        INTEGER NOT NULL DEFAULT 1,
+    checked_at   TEXT NOT NULL DEFAULT ''
 );
 """
 

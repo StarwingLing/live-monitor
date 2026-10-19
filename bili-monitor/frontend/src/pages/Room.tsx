@@ -2,10 +2,12 @@
 // 行为对齐：自适应轮询 20/(1+新增弹幕/10)s 夹 1~20s + document.hidden 暂停；
 // 弹幕增量游标 dm_since_id、分批/全量加载（上限 15000）、滚动增量渲染 + 头插锚定
 // （v2.3.2）、搜索过滤、日期分组；
-// 4 组 ECharts（粉丝量/增长 connect 联动、同接曲线、观众构成）；
+// 4 组 ECharts（粉丝量/增长 connect 联动、同接曲线、观众构成）；场次模式下
+// 主播卡粉丝双图位置改显本场直播间封面（v2.5.1，无封面占位）；
 // 场次模式数据只读单次加载 + 收益/人气双轴曲线板块（v2.2 替代原高能时刻）。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
+import WordCloud from "wordcloud";
 import { api, BASE } from "../api";
 import {
   toast, fmtNum, avatarGradient, cmpLabel, medalHtml,
@@ -33,7 +35,8 @@ interface Dashboard {
   room: { room_id: number; anchor_name: string; avatar_url: string };
   live_now: boolean;
   live: { seq: number; start_time: string };
-  session_info?: { seq: number; titles: string; start_time: string; end_time: string | null };
+  session_info?: { seq: number; titles: string; start_time: string; end_time: string | null;
+                   cover_url: string };
   attention: number; guard_users: number; guards_real: number | null;
   sessions: SessionRow[];
   fan_daily: { day: string; total: number; growth: number }[];
@@ -65,6 +68,13 @@ interface CurvesData {
   total_rev: number;
   peak_pop: number;
   points: { t: string; rev: number | null; pop: number | null }[];
+}
+interface WordCloudData {
+  session_id: number;
+  danmaku_total: number;
+  unique_tokens: number;
+  words: { name: string; value: number }[];
+  emotes: { text: string; short: string; count: number; url: string }[];
 }
 
 function uptimeSince(startTs: string): string {
@@ -101,6 +111,7 @@ export default function Room() {
   const [kw, setKw] = useState("");
   const [sortKey, setSortKey] = useState<"gift_value" | "danmaku_count">("gift_value");
   const [curves, setCurves] = useState<CurvesData | null>(null);
+  const [wcData, setWcData] = useState<WordCloudData | null>(null);
 
   // 弹幕分批状态（v0.8 口径）
   const [allDanmaku, setAllDanmaku] = useState<DmRow[]>([]);
@@ -194,6 +205,15 @@ export default function Room() {
     api<CurvesData>(`/api/rooms/${ROOM}/sessions/${SESSION_ID}/curves`)
       .then(setCurves)
       .catch(() => setCurves(null));
+  }, [ROOM, SESSION_ID]);
+
+  // ---- 弹幕词云（v2.3.4：置于曲线板块上方，仅场次页；后端首次分词
+  //      需 2~4s，之后进程内缓存命中）----
+  useEffect(() => {
+    if (!SESSION_ID) return;
+    api<WordCloudData>(`/api/rooms/${ROOM}/sessions/${SESSION_ID}/wordcloud`)
+      .then(setWcData)
+      .catch(() => setWcData(null));
   }, [ROOM, SESSION_ID]);
 
   // ---- 弹幕翻页 / 全量 ----
@@ -480,9 +500,24 @@ export default function Room() {
                 </div>
               </div>
             </div>
+            {/* v2.5.1：场次模式此位置改显本场直播间封面（建场时采集端写入，
+                历史场次无记录 → 占位图）；非场次（今日/在播）模式保留粉丝双图 */}
             <div style={{ marginTop: 8 }}>
-              <div ref={fanTotalRef} className="chart-box" style={{ height: 237, marginTop: 8 }} />
-              <div ref={fanGrowRef} className="chart-box" style={{ height: 237, marginTop: 4 }} />
+              {isSess ? (
+                <div className="cover-shot">
+                  {d.session_info!.cover_url && (
+                    <img src={d.session_info!.cover_url} alt="本场直播间封面"
+                         loading="lazy"
+                         onError={(e) => (e.target as HTMLImageElement).remove()} />
+                  )}
+                  <div className="cover-ph">本场无封面记录</div>
+                </div>
+              ) : (
+                <>
+                  <div ref={fanTotalRef} className="chart-box" style={{ height: 237, marginTop: 8 }} />
+                  <div ref={fanGrowRef} className="chart-box" style={{ height: 237, marginTop: 4 }} />
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -719,7 +754,10 @@ export default function Room() {
       </div>
 
       {SESSION_ID && (
-        <SessionCurves ROOM={ROOM} SESSION_ID={SESSION_ID} data={curves} />
+        <>
+          <SessionWordCloud ROOM={ROOM} SESSION_ID={SESSION_ID} data={wcData} />
+          <SessionCurves ROOM={ROOM} SESSION_ID={SESSION_ID} data={curves} />
+        </>
       )}
 
       <div className="card card-pad" style={{ marginTop: 16 }}>
@@ -768,7 +806,8 @@ export default function Room() {
 
 // ---------------------------------------------------------------------------
 // 收益 / 人气曲线板块（v2.2：原高能时刻板块位置）——双 y 轴折线：
-// 左轴收益（元/分，gifts 全口径按分钟桶）、右轴人气（加权），分钟网格
+// 左轴收益（元/分，gifts 全口径按分钟桶）、右轴人气（v2.5.1 起为房间观众
+// 数·高能榜口径，VLivePulse 同标准，与总览同接峰值同源），分钟网格
 // 对齐、单侧无值的分钟给 null（connectNulls 断点续画）。
 // ---------------------------------------------------------------------------
 function SessionCurves(p: { ROOM: number; SESSION_ID: number; data: CurvesData | null }) {
@@ -810,10 +849,157 @@ function SessionCurves(p: { ROOM: number; SESSION_ID: number; data: CurvesData |
       {p.data
         ? <div style={{ color: "var(--faint)", fontSize: 12, marginTop: 6 }}>
             本场营收合计 ¥{(p.data.total_rev || 0).toLocaleString()} ·
-            人气峰值 {(p.data.peak_pop || 0).toLocaleString()}（左轴为每分钟礼物+SC+上舰折算
-            额，右轴为加权人气，与直播间页面人气一致）
+            观众峰值 {(p.data.peak_pop || 0).toLocaleString()}（左轴为每分钟礼物+SC+上舰折算
+            额，右轴为房间观众数·高能榜口径，与直播间页面右上角人数及总览同接峰值同源）
           </div>
         : <div className="empty">本场暂无收益/人气数据</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 本场弹幕词云板块（v2.3.4）——置于收益/人气曲线上方，占主栏 100% 宽，
+// 内部横向排布：左词云（flex 自适应）+ 右表情 TOP12 瓦片（固定宽）。
+// 口径沿预览页定稿：TOP80 词 / 词距 gridSize 14 / 字号按词频 ^0.6 幂缩放。
+// 表情原图直取 danmaku.emots 的 B 站 CDN 地址（需联网），加载失败回退
+// 短名文字；词云本体只能画文本词条（wordcloud2.js 纯文本布局，图片词条
+// 无法混入）。
+//
+// 渲染选型（2026-10-17 实测定稿）：echarts-wordcloud 2.1.0 与本项目
+// echarts 6 不兼容（v6 重构布局任务管线，view.render 先于 registerLayout
+// 执行，layoutInstance 未建，整树崩溃；上游无 v6 支持），且其引 echarts
+// 全量入口会破坏按需注册的控体积策略。故改直连 wordcloud2.js（该插件
+// 的底层布局引擎，~20KB）：自管 canvas + dpr 缩放绘制，悬浮提示用其
+// hover 回调自实现（视觉对齐 TOOLTIP_THEME）。
+// ---------------------------------------------------------------------------
+const WC_PALETTE = ["#fb7299", "#4fa8e8", "#f2558c", "#d9a845", "#7ee0c3",
+                    "#9a8cff", "#ffb027", "#6fd3f7"];
+const WC_FONT = `"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+function SessionWordCloud(p: { ROOM: number; SESSION_ID: number; data: WordCloudData | null }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const tipRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const wrap = wrapRef.current, canvas = canvasRef.current;
+    if (!wrap || !canvas || !p.data || !p.data.words.length) return;
+
+    // dpr 缩放：布局参数与字号全部按设备像素放大，视觉尺寸不变、高分屏清晰
+    const dpr = window.devicePixelRatio || 1;
+    const W = Math.max(wrap.clientWidth, 60);
+    const H = Math.max(wrap.clientHeight, 60);
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+
+    // 字号映射：词频 ^0.6 幂缩放后线性拉到 12~96px（长尾可读、单调保序）
+    const ws = p.data.words;
+    const weights = ws.map((x) => Math.pow(x.value, 0.6));
+    const maxW = Math.max(...weights), minW = Math.min(...weights);
+    const fontSize = (w: number) =>
+      minW === maxW ? 48 * dpr : (12 + (w - minW) / (maxW - minW) * 84) * dpr;
+
+    // 绘制/重排共用一份配置：第三位透传真实词频供 hover 取用
+    const drawCloud = () => {
+      WordCloud(canvas, {
+        list: ws.map((x, i) => [x.name, fontSize(weights[i]), x.value]),
+        gridSize: 14 * dpr,
+        weightFactor: 1,
+        minRotation: 0, maxRotation: Math.PI / 2, rotationSteps: 2,  // 0°/90°
+        drawOutOfBound: false, shrinkToFit: true,
+        shuffle: false,             // 按词频稳定排布（大词优先占位）
+        backgroundColor: "transparent",
+        fontFamily: WC_FONT,
+        fontWeight: 600,
+        color: () => WC_PALETTE[Math.floor(Math.random() * WC_PALETTE.length)],
+        hover: (item, _dim, evt) => {
+          const tip = tipRef.current;
+          if (!tip) return;
+          if (!item) { tip.style.opacity = "0"; return; }
+          tip.textContent = `${item[0]}：${Number(item[2]).toLocaleString()} 次`;
+          tip.style.opacity = "1";
+          tip.style.left = evt.clientX + 12 + "px";
+          tip.style.top = evt.clientY - 30 + "px";
+        },
+      });
+    };
+    drawCloud();
+    const hideTip = () => {
+      if (tipRef.current) tipRef.current.style.opacity = "0";
+    };
+    canvas.addEventListener("mouseleave", hideTip);
+
+    // 窗口尺寸变化：重设画布并重排（词云布局依赖画布宽高）
+    let timer = 0;
+    const onResize = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const w2 = Math.max(wrap.clientWidth, 60) * dpr;
+        const h2 = Math.max(wrap.clientHeight, 60) * dpr;
+        if (canvas.width === w2 && canvas.height === h2) return;
+        canvas.width = w2; canvas.height = h2;
+        canvas.style.width = w2 / dpr + "px";
+        canvas.style.height = h2 / dpr + "px";
+        drawCloud();
+      }, 200);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      canvas.removeEventListener("mouseleave", hideTip);
+      window.clearTimeout(timer);
+      WordCloud.stop();   // 中止仍在进行的异步布局循环
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.data]);
+
+  return (
+    <div className="card card-pad" style={{ marginTop: 16 }}>
+      <h3>
+        本场弹幕词云
+        <span className="more">
+          {p.data
+            ? `TOP${p.data.words.length} · jieba 分词去停用词 · ` +
+              `${p.data.danmaku_total.toLocaleString()} 条弹幕`
+            : "分词统计中…"}
+        </span>
+      </h3>
+      <div className="wc-flex">
+        <div ref={wrapRef} className="wc-cloud">
+          <canvas ref={canvasRef} />
+        </div>
+        <div className="wc-emotes">
+          <div className="wc-emotes-head">
+            表情 TOP{p.data?.emotes.length ?? 12}
+            <span className="wc-emotes-note">（原图来自 B 站 CDN，需联网）</span>
+          </div>
+          <div className="wc-emotes-grid">
+            {(p.data?.emotes || []).map((e) => (
+              <div className="wc-emote" key={e.text}
+                   title={`${e.text} · ${e.count.toLocaleString()} 次`}>
+                <div className="wc-emote-img">
+                  {e.url
+                    ? <img src={e.url} alt={e.short} loading="lazy"
+                           onError={(ev) => {
+                             // CDN 失效/断网：退回短名文字
+                             const el = ev.target as HTMLImageElement;
+                             el.remove();
+                             el.parentElement?.appendChild(
+                               document.createTextNode(e.short));
+                           }} />
+                    : <span>{e.short}</span>}
+                </div>
+                <div className="wc-emote-name">{e.short}</div>
+                <div className="wc-emote-cnt">{e.count.toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      {!p.data && <div className="empty">本场暂无弹幕词云数据</div>}
+      {/* 悬浮提示（fixed 定位跟随鼠标，样式对齐 TOOLTIP_THEME） */}
+      <div ref={tipRef} className="wc-tip" />
     </div>
   );
 }

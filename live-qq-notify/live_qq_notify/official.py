@@ -101,24 +101,26 @@ class OfficialClient:
                         {"msg_type": 0, "content": content})
 
     def send_group_media_url(self, group_openid: str, url: str) -> None:
-        """封面图发送:URL 直传换 file_info(免下载到本地),再以 msg_type=7 发出。
+        """富媒体图片发送:URL 直传换 file_info(免下载到本地),再以 msg_type=7 发出。
 
-        两步任一失败抛 OfficialError(调用方按"文本已发、封面降级"处理,
-        不影响开播文本通知本身)。
+        实测修正(2026-10-17 服务器定位):files 接口**只认 JSON 请求体**——
+        表单体会返回 HTTP 200 + 表单形态响应(file_info=57&file_info=25&...),
+        JSON 解析必失败(当日生产日志"封面上传响应非 JSON"即此因,图片从未
+        发出过);改走 _post_json(JSON 体)后实测 200 返回
+        {file_uuid, file_info, ttl, id, raw_url},msg_type=7 发图端到端成功。
+        srv_send_msg=False=仅上传不代发;两步任一失败抛 OfficialError
+        (调用方按"文本已发、封面降级"处理,不影响开播文本通知本身)。
+
+        2026-10-18 补充(报告图链路实测):群富媒体**只收公网可访问 URL**——
+        multipart 文件体直传被平台拒绝(HTTP 400 + 40093007「富媒体文件
+        下载失败」,官方 SDK post_group_file 亦仅 url 字段)。本地生成的
+        报告图因此经 OSS 中转后走本方法(见 oss.py);曾实现的
+        send_group_media_file multipart 路线已删除。
         """
-        try:
-            r = self.client.post(
-                f"{API_BASE}/v2/groups/{group_openid}/files",
-                data={"file_type": 1, "url": url, "srv_send_msg": "false"},
-                headers={"Authorization": f"QQBot {self.access_token()}"})
-            body = r.json()
-        except httpx.HTTPError as e:
-            raise OfficialError(f"封面上传请求失败({e.__class__.__name__})") from e
-        except ValueError:
-            raise OfficialError(f"封面上传响应非 JSON(HTTP {r.status_code})") from None
+        body = self._post_json(f"/v2/groups/{group_openid}/files",
+                               {"file_type": 1, "url": url, "srv_send_msg": False})
         file_info = body.get("file_info") if isinstance(body, dict) else None
-        # 该接口成功响应亦为 {code:0,...} 形态或直接含 file_info,统一两判
         if not file_info:
-            raise OfficialError(f"封面上传失败: {str(body)[:160]}")
+            raise OfficialError(f"富媒体上传失败: {str(body)[:160]}")
         self._post_json(f"/v2/groups/{group_openid}/messages",
                         {"msg_type": 7, "media": {"file_info": file_info}})

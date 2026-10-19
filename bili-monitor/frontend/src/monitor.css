@@ -259,6 +259,60 @@ table.plain th.sortable:hover { color: var(--bone); }
 .qa-a small { font-size: 11px; color: var(--faint); font-weight: 400; }
 .qa-sub { font-size: 11px; color: var(--faint); margin-top: 4px; font-family: var(--mono); }
 
+/* ---------- 数据分析页·主播筛选条（v2.5.1） ----------
+   参考 VLivePulse（live.pixel-asoul.club）.streamer-strip 布局：头像瓦片网格、
+   名字在瓦片下方省略号截断、选中=边框变主题色+外扩光环。暗色适配：原站白卡
+   上 3px 白边做「贴纸分离」，此处改为 3px 页面底色（--ink 比卡片面板更深）
+   等效留缝；选中光环用品牌粉低透明度叠加，不引入新颜色。 */
+.streamer-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 14px 10px; align-items: start; }
+.streamer-tile { display: grid; justify-items: center; gap: 7px; min-width: 0; width: 100%; color: var(--sub); cursor: pointer; }
+.streamer-tile .ava {
+  display: flex; align-items: center; justify-content: center; position: relative;
+  width: clamp(56px, 5vw, 68px); height: clamp(56px, 5vw, 68px);
+  border: 3px solid var(--ink); border-radius: 20px; overflow: hidden;
+  color: #fff; font-size: 24px; font-weight: 700;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.streamer-tile .ava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.streamer-tile small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; }
+.streamer-tile:hover { color: var(--bone); }
+.streamer-tile.active { color: var(--pink); }
+.streamer-tile.active .ava {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 4px rgba(251, 114, 153, .16), 0 10px 24px rgba(251, 114, 153, .2);
+}
+
+/* ---------- 详情页·场次模式直播间封面（v2.5.1） ----------
+   主播卡粉丝双图位置的替换板块：开播时采集端落 live_sessions.cover_url
+   （user_cover 优先、系统封面兜底）；旧场次无记录 → 占位文案。占位文案
+   常驻 DOM、img 绝对定位覆盖其上，加载失败 onError 移除后文案自显
+   （与头像瓦片同款兜底模式）。 */
+.cover-shot {
+  position: relative; height: 280px; margin-top: 8;
+  border: 1px solid var(--line-soft); border-radius: 12px;
+  overflow: hidden; background: var(--ink);
+  display: flex; align-items: center; justify-content: center;
+}
+.cover-shot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cover-shot .cover-ph { color: var(--faint); font-size: 12.5px; letter-spacing: .06em; }
+
+/* ---------- 数据分析页·骨架屏（v2.5.1） ----------
+   切换主播/统计窗口时的加载占位。常规做法（NNGroup/LogRocket 范例）：
+   块形状与真实内容一一对应防布局跳动（metric 瓦片/qa 卡/等高图块/图例行），
+   微光自左向右扫过提示进行中。颜色取 bone 的低透明度阶（与 --line-soft
+   同族），不引入新色；prefers-reduced-motion 用户关闭动画只留静态块。 */
+.sk {
+  background: linear-gradient(100deg,
+    rgba(226, 234, 244, .045) 42%,
+    rgba(226, 234, 244, .10) 50%,
+    rgba(226, 234, 244, .045) 58%);
+  background-size: 200% 100%;
+  animation: sk-sweep 1.6s linear infinite;
+  border-radius: 7px;
+}
+@keyframes sk-sweep { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
+
 /* ---------- 高能板块 ---------- */
 
 /* ---------- 管理页 ---------- */
@@ -344,6 +398,27 @@ table.plain th.sortable:hover { color: var(--bone); }
   padding-bottom: 9px; border-bottom: 1px solid var(--line-soft);
 }
 .nf-hint-line { font-size: 12px; color: var(--sub); margin-bottom: 14px; line-height: 1.7; }
+/* 机器人选择区(v2.5.0):左按钮流+新建,右齿轮改名气泡 */
+.bt-bots { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; }
+.bt-bots-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.bt-bot-chip { padding: 5px 14px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--ink-2); color: inherit;
+  font-size: 13px; cursor: pointer; }
+.bt-bot-chip.on { border-color: var(--blue); color: var(--blue); }
+.bt-bot-chip.add { font-weight: 700; }
+.bt-bots-pop-wrap { position: relative; flex: none; }
+.bt-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+  min-width: 220px; }
+.bt-pop input { font-size: 13px; }
+.bt-pop-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* 房间卡片:所属机器人下拉(与群号输入同宽风格) */
+.bt-room-bot select { width: 100%; font-size: 13px; padding: 5px 6px;
+  background: var(--ink-2); color: inherit; border: 1px solid var(--line);
+  border-radius: 6px; }
 .nf-admin-form { display: flex; flex-direction: column; gap: 10px; }
 .nf-row3 {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px;
@@ -365,20 +440,206 @@ table.plain th.sortable:hover { color: var(--bone); }
 .nf-probe-bar { display: flex; gap: 8px; flex-wrap: wrap; }
 .nf-probe-bar input { flex: 1; min-width: 200px; font-size: 13px; }
 .nf-probe-results { display: flex; flex-direction: column; gap: 4px; }
+/* 群映射行(v2.4.1 加备注):群号 | 备注输入 | openid(弹性) | 解绑 */
 .nf-maprow {
   display: flex; align-items: center; gap: 10px; font-size: 12px;
+  flex-wrap: wrap;
 }
-.nf-mapoid { color: var(--sub); flex: 1; word-break: break-all; }
-/* 指令自动回复行编辑器(v2.3.1):左指令右回复,行末移除 */
-.nf-cmdrow { display: flex; gap: 6px; align-items: center; }
-.nf-cmd-k { flex: 0 0 32%; font-size: 13px; }
-.nf-cmd-v { flex: 1; font-size: 13px; }
+.nf-mapgid { white-space: nowrap; }
+.nf-map-remark { width: 150px; font-size: 12px; padding: 3px 7px; }
+.nf-mapoid { color: var(--sub); flex: 1; word-break: break-all; min-width: 120px; }
+/* 指令自动回复条目编辑器(v2.3.1;v2.4.1 重排):每条指令圆角外框包裹,
+   框内上行=生效群多选+指令输入、下行=自动增高回复框;移除按钮在框右侧 */
+.nf-cmdwrap { display: flex; gap: 8px; align-items: center; }
+.nf-cmd-card {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--ink-2);
+}
+.nf-cmd-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.nf-cmd-k { flex: 1; min-width: 140px; font-size: 13px; }
 .nf-cmd-x { flex: none; }
+/* 生效群多选下拉(v2.4.1):限定群时按钮粉边,提示当前非「全部群」默认口径 */
+.nf-cmdg { position: relative; flex: none; }
+.nf-cmdg-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--bone); white-space: nowrap;
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel-2);
+}
+.nf-cmdg-btn:hover { border-color: rgba(226, 234, 244, .25); }
+.nf-cmdg-btn.scoped { color: var(--pink); border-color: rgba(251, 114, 153, .45); }
+.nf-cmdg-btn .caret { font-size: 10px; color: var(--sub); }
+.nf-cmdg-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  min-width: 190px; max-height: 236px; overflow-y: auto;
+  padding: 6px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nf-cmdg-opt {
+  display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  width: 100%; padding: 6px 8px; border-radius: 6px;
+  color: var(--bone); text-align: left;
+}
+.nf-cmdg-opt:hover { background: var(--panel-2); }
+.nf-cmdg-box {
+  width: 15px; height: 15px; flex: none; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--ink-2);
+}
+.nf-cmdg-opt.on { color: var(--pink); }
+.nf-cmdg-opt.on .nf-cmdg-box {
+  background: var(--pink); border-color: var(--pink);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.nf-cmdg-opt.on .nf-cmdg-box::after { content: "✓"; font-size: 10px; color: #fff; }
+.nf-cmdg-empty { font-size: 12px; color: var(--sub); padding: 6px 8px; }
 .nf-admin-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
 .nf-testmsg { font-size: 12px; color: var(--sub); line-height: 1.5; }
 /* 变量悬浮提示(v2.3:label 悬浮列出模板变量及含义) */
 .nf-tip { cursor: help; }
 .nf-tip:hover { color: var(--pink); }
+
+/* ---- 机器人管理页(v2.4.0):页头运行状态条 ----
+   进页自动探测通道在线状态:通道徽章 + 在线点 + 登录身份 + 测试连接。
+   通道徽章配色 = 页内唯一的强调位(official 粉边 / napcat 蓝边)。 */
+.bt-status {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin: 0 0 18px; padding: 13px 18px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel), var(--ink-2));
+}
+.bt-chan {
+  font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  white-space: nowrap;
+}
+.bt-chan.official {
+  color: var(--pink); border: 1px solid rgba(251, 114, 153, .45);
+  background: rgba(251, 114, 153, .10);
+}
+.bt-chan.napcat {
+  color: var(--blue); border: 1px solid rgba(79, 168, 232, .45);
+  background: rgba(79, 168, 232, .10);
+}
+.bt-live { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bone); }
+.bt-live .dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--green); box-shadow: 0 0 8px var(--green);
+}
+.bt-live.off { color: var(--sub); }
+.bt-live.off .dot { background: var(--sub); box-shadow: none; }
+.bt-who { font-size: 12.5px; color: var(--sub); white-space: nowrap; }
+.bt-why {
+  font-size: 12px; color: var(--sub); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 46ch; min-width: 0;
+}
+.bt-label { font-size: 12px; color: var(--sub); white-space: nowrap; }
+
+/* ---- 通道与登录:两种发送方式左右各半的可选卡(v2.4.0) ----
+   点击标题行切换使用中的通道;选中卡粉边提亮,未选中保持可编辑。 */
+.bt-chan-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  margin-top: 12px; align-items: stretch;
+}
+.bt-chan-card {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--ink-2);
+}
+.bt-chan-card.on {
+  border-color: rgba(251, 114, 153, .55);
+  background: linear-gradient(180deg, rgba(251, 114, 153, .07), var(--ink-2));
+}
+.bt-chan-head {
+  display: flex; align-items: center; gap: 10px;
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; color: var(--bone); text-align: left;
+}
+.bt-radio {
+  width: 15px; height: 15px; border-radius: 50%; flex: none;
+  border: 2px solid var(--sub); background: transparent;
+  transition: border-color .12s, background .12s;
+}
+.bt-chan-card.on .bt-radio {
+  border-color: var(--pink);
+  background: radial-gradient(circle, var(--pink) 0 45%, transparent 50%);
+}
+.bt-chan-name { font-size: 14.5px; font-weight: 600; }
+.bt-chan-card:not(.on) .bt-chan-name { color: var(--sub); font-weight: 500; }
+.bt-using {
+  margin-left: auto; font-size: 11.5px; color: var(--pink);
+  border: 1px solid rgba(251, 114, 153, .4); border-radius: 999px;
+  padding: 2px 10px; white-space: nowrap;
+}
+.bt-probe-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 2px; padding-top: 10px; border-top: 1px dashed var(--line);
+}
+.bt-probe-msg { font-size: 12px; color: var(--sub); line-height: 1.5; }
+@media (max-width: 960px) {
+  .bt-chan-grid { grid-template-columns: 1fr; }
+}
+
+/* ---- 通知开关与文案:文案大标题行自带开关(v2.4.0) ---- */
+.bt-tpl-head {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-top: 6px;
+}
+.bt-tpl-title { font-size: 15px; font-weight: 700; color: var(--bone); }
+.bt-tpl-ctl {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding-left: 14px; border-left: 1px solid var(--line);
+}
+.bt-tpl-sub { font-size: 12.5px; color: var(--sub); white-space: nowrap; }
+.bt-tpl-head .nf-sw { margin-left: auto; }
+.bt-tpl-head .bt-tpl-ctl:last-of-type .nf-sw { margin-left: 0; }
+.bt-debounce input { max-width: 180px; }
+
+/* ---- 保存按钮下分隔线 + 主播个人配置卡片(v2.4.0) ---- */
+.bt-divider {
+  height: 1px; background: var(--line);
+  margin: 22px 0 16px;
+}
+.bt-block-sub { font-size: 12px; color: var(--sub); margin: -10px 0 14px; }
+.bt-room-card {
+  display: grid; grid-template-columns: 56px 1fr; gap: 14px;
+  padding: 14px 16px; margin-bottom: 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--ink-2);
+}
+.bt-avatar {
+  position: relative; width: 56px; height: 56px; border-radius: 50%;
+  overflow: hidden; background: var(--panel-2); flex: none;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--sub); font-size: 20px; font-weight: 600;
+}
+.bt-avatar img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+}
+.bt-room-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.bt-room-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.bt-room-name { font-size: 15.5px; font-weight: 700; color: var(--bone); }
+.bt-room-id { font-size: 12px; color: var(--sub); }
+.bt-room-reset { margin-left: auto; }
+.bt-room-groups input { width: 100%; }
+.bt-room-actions { display: flex; justify-content: flex-end; }
+/* 「跟随全局」芯片:点亮=继承全局(quiet),灰暗=个人覆盖生效 */
+.bt-inherit {
+  font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  color: var(--blue); border: 1px solid rgba(79, 168, 232, .45);
+  background: rgba(79, 168, 232, .10); border-radius: 999px;
+  padding: 3px 8px; margin-left: 7px; vertical-align: 1px; white-space: nowrap;
+}
+.bt-inherit:hover { border-color: var(--blue); }
+.bt-inherit.ov { color: var(--sub); border-color: var(--line); background: none; }
+/* 文案输入框:随内容被动扩高,禁手动拖拽与滚动条(v2.4.0) */
+.bt-auto-area { resize: none; overflow: hidden; min-height: 34px; }
+@media (max-width: 960px) {
+  .bt-room-card { grid-template-columns: 1fr; }
+  .bt-avatar { width: 48px; height: 48px; font-size: 17px; }
+  .bt-tpl-head .nf-sw { margin-left: 0; }
+  .bt-room-reset { margin-left: 0; }
+}
 /* 扫码登录区(v2.3:二维码嵌入板块) */
 .nf-qrbox {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
@@ -389,3 +650,46 @@ table.plain th.sortable:hover { color: var(--bone); }
 .nf-qrmsg { font-size: 12.5px; color: var(--sub); }
 .nf-qrmsg.ok { color: var(--green); }
 .nf-qrmsg.err { color: var(--red); line-height: 1.6; }
+
+/* ---- 弹幕词云板块（v2.3.4）：横向布局，左词云 + 右表情 TOP12 瓦片 ---- */
+.wc-flex { display: flex; gap: 16px; align-items: stretch; }
+.wc-cloud { flex: 1 1 0; min-width: 0; height: 420px; }
+.wc-emotes { flex: none; width: 330px; }
+.wc-emotes-head { font-size: 12px; color: var(--faint); margin-bottom: 8px; }
+.wc-emotes-note { color: var(--faint); opacity: .7; }
+.wc-emotes-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  align-content: start;
+}
+.wc-emote {
+  background: var(--ink-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 4px 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  text-align: center; min-width: 0;
+}
+.wc-emote-img {
+  height: 48px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--sub);
+}
+.wc-emote-img img { max-width: 48px; max-height: 48px; }
+.wc-emote-name {
+  font-size: 10.5px; color: var(--bone); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wc-emote-cnt { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* 窄屏（同本页其他板块的 ≤1000px 折叠口径）：纵向堆叠，表情榜转 6 列横排 */
+@media (max-width: 1000px) {
+  .wc-flex { flex-direction: column; }
+  .wc-emotes { width: 100%; }
+  .wc-emotes-grid { grid-template-columns: repeat(6, 1fr); }
+}
+/* 词云画布与自绘悬浮提示（wordcloud2.js 直绘，非 echarts） */
+.wc-cloud canvas { display: block; }
+.wc-tip {
+  position: fixed; z-index: 90; pointer-events: none; opacity: 0;
+  background: rgba(14, 19, 29, .94);
+  border: 1px solid rgba(226, 234, 244, .14); border-radius: 8px;
+  padding: 6px 10px; font-size: 12px; color: #e8edf4; white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(2, 6, 14, .5);
+  transition: opacity .12s;
+}

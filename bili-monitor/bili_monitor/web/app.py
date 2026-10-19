@@ -13,9 +13,11 @@
 """
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
@@ -42,10 +44,16 @@ async def lifespan(_app: FastAPI):
     TestClient 不以 with 使用时不触发 lifespan，单测不受影响。"""
     auth.seed_web_credentials()
     ev_stop = asyncio.Event()
-    ev_task = asyncio.create_task(_official_event_loop(ev_stop))
+    # 本地调试开关：BILI_DISABLE_OFFICIAL_EVENTS=1 时不连官方事件中枢——
+    # 本地库快照含真实凭据，起第二个 WebSocket 会与服务器实例互挤连接
+    # （指令自动回复由服务器侧继续承担，本地只调页面）
+    ev_task = None
+    if not os.environ.get("BILI_DISABLE_OFFICIAL_EVENTS"):
+        ev_task = asyncio.create_task(_official_event_loop(ev_stop))
     yield
     ev_stop.set()
-    ev_task.cancel()
+    if ev_task is not None:
+        ev_task.cancel()
 
 
 app = FastAPI(
@@ -459,14 +467,18 @@ async def session_curves(room_id: int, session_id: int):
     """场次收益曲线 + 人气曲线叠加数据（v2.2，替代已移除的高能时刻板块）。
 
     收益（元/分）：gifts 表（gift/sc/guard 全口径，value_yuan 采集时已按
-    盲盒映射兜底折算）按分钟桶聚合；人气：anchor_snapshots.online（HTTP
-    主播指标快照的加权人气，同总览页口径）——WS 侧 popularity_snapshots.
-    popularity 上游已恒推 1（2026-10-12 核实全部历史快照均为 1），不可用。
-    快照约 2 分钟一轮，分钟网格每格取时间最近的快照值（就近取，查询窗口
-    向两侧放宽兜边界），某分钟无礼物时 rev 给 null（前端 connectNulls
-    断点续画）。窗口为场次起止（在播场次取到当前分钟）各放宽 1 分钟兜
-    边界取整误差；超长场次（>2000 分钟）退化为只输出有值分钟（此时人气
-    不再就近铺满，仅保留快照所在分钟），避免响应膨胀。"""
+    盲盒映射兜底折算）按分钟桶聚合；人气：popularity_snapshots.viewers
+    ——WS ONLINE_RANK_COUNT 命令的「房间观众数」（高能榜口径，即直播间
+    页面右上角人数，外部可获取的最真实同接，v2.5.1 起为本板块标准，
+    与总览「同接峰值」同源；VLivePulse 站人气曲线同口径）。快照约 1 分钟
+    一轮，分钟网格每格取时间最近的快照值（就近取），某分钟无礼物时 rev
+    给 null（前端 connectNulls 断点续画）。v2.2~v2.5.0 曾用
+    anchor_snapshots.online（HTTP 加权热度）：WS 侧 popularity 上游恒推 1
+    （2026-10-12 核实全部历史快照均为 1）不可用故当时借道 HTTP；v2.5.1
+    改用 viewers 后按 session_id 直查（不再房间+时间窗口穿场取样，在播
+    场次只取本场次快照）。窗口为场次起止（在播场次取到当前分钟）各放宽
+    1 分钟兜边界取整误差；超长场次（>2000 分钟）退化为只输出有值分钟
+    （此时人气不再就近铺满，仅保留快照所在分钟），避免响应膨胀。"""
     import time as _time
     import datetime as _dt2
     fmt = "%Y-%m-%dT%H:%M:%S"
@@ -489,15 +501,11 @@ async def session_curves(room_id: int, session_id: int):
                "WHERE session_id = ? AND value_yuan > 0", (session_id,)):
         m = _epoch_min(g["ts"])
         rev[m] = round(rev.get(m, 0.0) + float(g["value_yuan"]), 2)
-    # 人气快照：网格外两侧各放宽约 2 分钟（一个采样周期），保证边界分钟
-    # 的「最近快照」存在
-    snaps = q("SELECT ts, online FROM anchor_snapshots "
-              "WHERE room_id = ? AND online > 0 AND ts >= ? AND ts <= ? "
-              "ORDER BY ts",
-              (room_id, _dt2.datetime.fromtimestamp((m0 - 1) * 60).strftime(fmt),
-               _dt2.datetime.fromtimestamp((m1 + 1) * 60).strftime(fmt)))
+    # 人气快照：按场次直查（列内建归属，60s 采样密度高于旧 HTTP 轮询）
+    snaps = q("SELECT ts, viewers FROM popularity_snapshots "
+              "WHERE session_id = ? AND viewers > 0 ORDER BY ts", (session_id,))
     s_ts = [int(_time.mktime(_time.strptime(s["ts"], fmt))) for s in snaps]
-    s_val = [int(s["online"]) for s in snaps]
+    s_val = [int(s["viewers"]) for s in snaps]
     pop: dict[int, int] = {}
     if m1 - m0 <= 2000:
         grid = list(range(m0, m1 + 1))
@@ -514,10 +522,11 @@ async def session_curves(room_id: int, session_id: int):
         for k, t in enumerate(s_ts):
             pop[t // 60] = s_val[k]
         grid = sorted(set(rev) | set(pop))
-    # 峰值只统计场次窗口内的快照（放宽带的窗外快照不计入）
-    pk = q1("SELECT MAX(online) AS mx FROM anchor_snapshots "
-            "WHERE room_id = ? AND online > 0 AND ts >= ? AND ts <= ?",
-            (room_id, sess["start_time"], end.strftime(fmt)))
+    # 峰值只统计场次窗口内的快照（快照归属本就按场次，窗口仅兜极早期
+    # session_id 赋值前的边界偏差）
+    pk = q1("SELECT MAX(viewers) AS mx FROM popularity_snapshots "
+            "WHERE session_id = ? AND viewers > 0 AND ts >= ? AND ts <= ?",
+            (session_id, sess["start_time"], end.strftime(fmt)))
     points = [{
         "t": _dt2.datetime.fromtimestamp(m * 60).strftime(fmt),
         "rev": rev.get(m),
@@ -530,6 +539,28 @@ async def session_curves(room_id: int, session_id: int):
 
 
 # ---------------------------------------------------------------------------
+# v2.3.4 本场弹幕词云（详情页场次模式「弹幕词云」板块数据源，置于
+# 收益/人气曲线板块上方）
+# ---------------------------------------------------------------------------
+@app.get("/api/rooms/{room_id}/sessions/{session_id}/wordcloud")
+async def session_wordcloud(room_id: int, session_id: int):
+    """场次弹幕分词词频 TOP80 + 表情 TOP12（含 B 站 CDN 原图 URL）。
+
+    口径与性能说明见 web/wordcloud.py 模块头注释（预处理/分词/停用词/
+    进程内缓存）；首次调用加载 jieba 词典并分词约 2~4s，之后缓存命中。
+    房间隔离校验与 curves 端点同款（session 必须属于该 room）。"""
+    from . import wordcloud as _wc
+    if not q1("SELECT session_id FROM live_sessions "
+              "WHERE session_id = ? AND room_id = ?", (session_id, room_id)):
+        raise HTTPException(404, "场次不存在")
+    conn = connect()
+    try:
+        return _wc.compute(conn, session_id)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # 查询接口
 # ---------------------------------------------------------------------------
 @app.get("/api/rooms")
@@ -538,10 +569,14 @@ async def list_rooms(request: Request):
     v0.5：带出主播描述与标签（总览页"描述行/标签列"渲染用）。
     v1.3.1：监控码 replay_code 字段移除（功能已迁 replay 项目，其管理页
     经自有接口读取共享库）；v2.2：高能开关 record_enabled 字段随高能功能
-    移除（回放侧消费，本站不再带出）。"""
+    移除（回放侧消费，本站不再带出）。
+    v2.5.1：带出 avatar_url——数据分析页主播筛选条瓦片与总览页头像
+    img 直接消费（此前前端接口声明了该字段但此处从未下发，头像一直
+    走渐变+首字回退）。"""
     rows = q("""
-        SELECT r.room_id, r.anchor_name, r.enabled, r.created_at, r.description,
-               s.session_id AS cur_session, s.start_time AS live_start,
+        SELECT r.room_id, r.anchor_name, r.avatar_url, r.enabled, r.created_at,
+               r.description, s.session_id AS cur_session,
+               s.start_time AS live_start,
                (SELECT popularity FROM popularity_snapshots p
                  WHERE p.room_id = r.room_id ORDER BY p.ts DESC LIMIT 1) AS popularity
         FROM rooms r
@@ -1210,6 +1245,7 @@ async def room_dashboard(room_id: int, session_id: int | None = None,
     if session_mode:
         session_info = q1(f"""SELECT session_id, start_time, end_time, peak_popularity,
                                      peak_viewers, danmaku_count, round(gift_value_yuan,2) AS gift_value,
+                                     cover_url,
                                      {_TITLES_EXPR}
                              FROM live_sessions WHERE session_id = ? AND room_id = ?""",
                           (session_id, room_id))
@@ -1569,8 +1605,9 @@ async def delete_blind_price(gift_name: str, request: Request, token: str | None
 # ---------------------------------------------------------------------------
 # 开播 QQ 群通知配置（v2.3：live-qq-notify 项目联动）
 # ---------------------------------------------------------------------------
-# 数据落共享库 qq_notify / qq_notify_global 两表（DDL 见 db.py，属主为
-# live-qq-notify 的 store.py，此处锁步）；配置只入库、不经本服务转发——
+# 数据落共享库 qq_notify（房间级）/ qq_bots（机器人档案，v2.5.0 起；DDL
+# 见 db.py，属主为 live-qq-notify 的 store.py，此处锁步；旧全局表
+# qq_notify_global 已冻结弃用）；配置只入库、不经本服务转发——
 # 通知器进程每轮（60s）热加载，页面改完最迟一个轮询周期生效。
 # 房间级：总览页「通知」列开关 + 设置弹窗（群映射/房间专属文案）；
 # 全局级：管理页「开播账号管理」板块（QQ 号预留/NapCat 连接/总开关/默认文案）。
@@ -1583,38 +1620,36 @@ import urllib.request as _urlreq
 _OFFICIAL_API = "https://api.bot.qq.com"
 
 
-def _qq_global_row() -> dict:
-    """读全局配置单行（init_db 已播种；此处再防御性补种一次）。
+def _qq_bot_row(bot_id: int) -> dict:
+    """读机器人档案单行（v2.5.0 qq_bots；init_db 迁移已把旧全局种子为机器人1）。
 
-    command_replies（v2.3.1 群指令表）解析为 dict 透出：库中为空对象或
-    脏 JSON 时回退代码默认表 QQ_COMMAND_REPLIES（=「清空并保存=恢复默认」
-    的生效口径；事件中枢取值同此）。
+    command_replies（v2.3.1 群指令表）解析归一后透出：库中为空对象或脏
+    JSON 时回退代码默认表 QQ_COMMAND_REPLIES（=「清空并保存=恢复默认」的
+    生效口径；事件中枢取值同此）。v2.4.1 起统一为 {指令: {reply, groups}}
+    形状——v2.3.1 旧库的纯字符串值在此转为 groups=[]（全部群），读写两侧
+    形状一致，前端/事件中枢无需各自兼容。
     """
-    row = q1("SELECT * FROM qq_notify_global WHERE id = 1")
+    row = q1("SELECT * FROM qq_bots WHERE id = ?", (int(bot_id),))
     if row is None:
-        conn = connect()
-        try:
-            conn.execute("INSERT OR IGNORE INTO qq_notify_global (id) VALUES (1)")
-            conn.commit()
-        finally:
-            conn.close()
-        row = q1("SELECT * FROM qq_notify_global WHERE id = 1")
+        raise HTTPException(404, f"机器人 {bot_id} 不存在")
     row["notify_on"] = bool(row["notify_on"])
     row["notify_off"] = bool(row["notify_off"])
+    row["report_offline"] = bool(row.get("report_offline", 0))
+    # v2.5.0 AI 智能回复开关布尔化（其余 AI 字段原样字符串透出，空=内置默认）
+    row["ai_reply_enabled"] = bool(row.get("ai_reply_enabled", 0))
     try:
         replies = json.loads(row.get("command_replies") or "{}")
         assert isinstance(replies, dict)
     except (ValueError, TypeError, AssertionError):
         replies = {}
-    row["command_replies"] = replies if replies else dict(QQ_COMMAND_REPLIES)
+    row["command_replies"] = _norm_command_table(replies)
     return row
 
 
-class QQNotifyGlobalIn(BaseModel):
-    """全局配置 PATCH 体（全字段可选，只改传入项）。
-    notify_cover 已停用（2026-10-14：封面/时长均为纯模板变量）。
-    v2.3.1：官方 QQ 机器人通道字段（channel/official_app_id/official_app_secret）
-    与群指令自动回复表（command_replies，页面键值对编辑；空 dict=回退代码默认）。"""
+class QQNotifyBotIn(BaseModel):
+    """机器人档案 PATCH 体（v2.5.0 多机器人；全字段可选，只改传入项）。
+    notify_cover 已停用（2026-10-14：封面/时长均为纯模板变量）。含 v2.3.1
+    官方通道字段、v2.4.1 指令表、v2.5.0 AI 七字段。"""
     qq_account: str | None = None
     onebot_url: str | None = None
     onebot_token: str | None = None
@@ -1623,26 +1658,109 @@ class QQNotifyGlobalIn(BaseModel):
     channel: str | None = None
     official_app_id: str | None = None
     official_app_secret: str | None = None
-    command_replies: dict[str, str] | None = None
+    # v2.4.1：值可为新格式 {reply, groups} 或 v2.3.1 旧格式纯字符串
+    # （= 全部群），handler 内统一归一校验后以新格式落库
+    command_replies: dict[str, Any] | None = None
+    # v2.5.0 AI 智能回复（指令未命中时 LLM 兜底；空串=内置默认，仅
+    # ai_reply_enabled 开且 ai_api_key 非空才生效）
+    ai_reply_enabled: bool | None = None
+    ai_api_key: str | None = None
+    ai_base_url: str | None = None
+    ai_model: str | None = None
+    ai_system_prompt: str | None = None
+    ai_rate_limit: int | None = None     # 频控:每群每窗口最多次数(默认 3)
+    ai_rate_window: int | None = None    # 频控:窗口秒数(默认 300)
     notify_on: bool | None = None
     notify_off: bool | None = None
+    report_offline: bool | None = None   # 下播报告图开关（v2.3.2 联动 live-qq-notify）
     template_on: str | None = None
     template_off: str | None = None
     debounce_offline: int | None = None
     token: str | None = None   # X-Admin-Token 旧通道兼容（check_admin 用）
 
 
-@app.get("/api/qq-notify/global")
-async def qq_notify_global_get(request: Request):
-    """全局通知配置（含 NapCat token，仅管理员）。"""
+class QQBotCreateIn(BaseModel):
+    """新建机器人入参（v2.5.0；name 可空=自动「机器人N」）。"""
+    name: str | None = None
+    token: str | None = None
+
+
+class QQBotRenameIn(BaseModel):
+    """机器人改名入参（v2.5.0 齿轮气泡；≤20 字）。"""
+    name: str
+    token: str | None = None
+
+
+@app.get("/api/qq-notify/bots")
+async def qq_notify_bots(request: Request):
+    """机器人选择区列表（v2.5.0 多机器人；id 升序）。"""
     check_admin(request)
-    return _qq_global_row()
+    rows = q("SELECT id, name, channel, official_app_id FROM qq_bots ORDER BY id")
+    return {"items": [dict(r) for r in rows]}
 
 
-@app.patch("/api/qq-notify/global")
-async def qq_notify_global_patch(body: QQNotifyGlobalIn, request: Request):
-    """更新全局通知配置（逐字段合并；空串=清空该项）。"""
+@app.post("/api/qq-notify/bots")
+async def qq_notify_bot_create(body: QQBotCreateIn, request: Request):
+    """新建机器人档案（默认全出厂值；页面各板块再逐项配置）。"""
     check_admin(request, body.token)
+    name = (body.name or "").strip()[:20]
+    conn = connect()
+    try:
+        cur = conn.execute("INSERT INTO qq_bots (name) VALUES (?)", (name,))
+        bot_id = int(cur.lastrowid)
+        conn.commit()
+    finally:
+        conn.close()
+    if not name:
+        # 自动命名「机器人N」（按表内数量，与 id 解耦避免删行后跳号观感）
+        n = q1("SELECT count(*) AS c FROM qq_bots")["c"]
+        name = f"机器人{n}"
+        conn = connect()
+        try:
+            conn.execute("UPDATE qq_bots SET name = ? WHERE id = ?",
+                         (name, bot_id))
+            conn.commit()
+        finally:
+            conn.close()
+    return {"id": bot_id, "name": name}
+
+
+@app.patch("/api/qq-notify/bots/{bot_id}")
+async def qq_notify_bot_rename(bot_id: int, body: QQBotRenameIn,
+                               request: Request):
+    """机器人改名（选择区齿轮气泡；空名/超长 400）。"""
+    check_admin(request, body.token)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "机器人名称不能为空")
+    if len(name) > 20:
+        raise HTTPException(400, "机器人名称过长（≤20 字符）")
+    if not q1("SELECT id FROM qq_bots WHERE id = ?", (bot_id,)):
+        raise HTTPException(404, f"机器人 {bot_id} 不存在")
+    conn = connect()
+    try:
+        conn.execute("UPDATE qq_bots SET name = ?, updated_at = ? WHERE id = ?",
+                     (name, now_iso(), bot_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": bot_id, "name": name}
+
+
+@app.get("/api/qq-notify/bot/{bot_id}")
+async def qq_notify_bot_get(bot_id: int, request: Request):
+    """机器人完整配置（含 NapCat token，仅管理员）。"""
+    check_admin(request)
+    return _qq_bot_row(bot_id)
+
+
+@app.patch("/api/qq-notify/bot/{bot_id}")
+async def qq_notify_bot_patch(bot_id: int, body: QQNotifyBotIn,
+                              request: Request):
+    """更新机器人配置（逐字段合并；空串=清空该项）。"""
+    check_admin(request, body.token)
+    if not q1("SELECT id FROM qq_bots WHERE id = ?", (bot_id,)):
+        raise HTTPException(404, f"机器人 {bot_id} 不存在")
     if body.onebot_url is not None:
         u = body.onebot_url.strip()
         if u and not u.startswith(("http://", "https://")):
@@ -1651,27 +1769,58 @@ async def qq_notify_global_patch(body: QQNotifyGlobalIn, request: Request):
         u = body.webui_url.strip()
         if u and not u.startswith(("http://", "https://")):
             raise HTTPException(400, "WebUI 地址须以 http:// 或 https:// 开头")
+    if body.ai_base_url is not None:
+        u = body.ai_base_url.strip()
+        if u and not u.startswith(("http://", "https://")):
+            raise HTTPException(400, "AI 接口地址须以 http:// 或 https:// 开头")
+    if body.ai_rate_limit is not None and not 1 <= body.ai_rate_limit <= 50:
+        raise HTTPException(400, "AI 频控次数须在 1~50 之间")
+    if body.ai_rate_window is not None and not 60 <= body.ai_rate_window <= 86400:
+        raise HTTPException(400, "AI 频控窗口须在 60~86400 秒之间")
     if body.debounce_offline is not None and not 0 <= body.debounce_offline <= 86400:
         raise HTTPException(400, "防抖秒数须在 0~86400 之间")
     if body.channel is not None and body.channel not in ("napcat", "official"):
         raise HTTPException(400, "channel 只支持 napcat / official")
+    cr_norm: dict[str, dict] | None = None   # 指令表归一结果（v2.4.1 新格式）
     if body.command_replies is not None:
-        # 指令表校验：键值非空、键 ≤32、值 ≤500（群消息长度余量）、条目 ≤50
+        # 指令表校验：键值非空、键 ≤32、回复 ≤500（群消息长度余量）、条目 ≤50；
+        # v2.4.1 值兼容旧纯字符串（= 全部群）与 {reply, groups} 对象，
+        # 限定群号须正整数、去重排序、每条 ≤20 个（对齐房间通知群映射上限）
         cr = body.command_replies
         if len(cr) > 50:
             raise HTTPException(400, "指令最多 50 条")
+        cr_norm = {}
         for k, v in cr.items():
-            if not str(k).strip() or not str(v).strip():
+            k = str(k).strip()
+            if isinstance(v, dict):
+                reply = str(v.get("reply") or "").strip()
+                try:
+                    groups = sorted({int(x) for x in (v.get("groups") or [])})
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "限定群号须为整数列表")
+                if any(x <= 0 for x in groups):
+                    raise HTTPException(400, "限定群号须为正整数")
+                if len(groups) > 20:
+                    raise HTTPException(400, "单条指令最多限定 20 个群")
+            elif isinstance(v, str):
+                reply, groups = v.strip(), []   # v2.3.1 旧格式 = 全部群生效
+            else:
+                raise HTTPException(400,
+                                    "指令条目须为回复文本或 {reply, groups} 对象")
+            if not k or not reply:
                 raise HTTPException(400, "指令与回复内容都不能为空")
             if len(k) > 32:
                 raise HTTPException(400, f"指令过长（≤32 字符）：{k[:16]}…")
-            if len(v) > 500:
+            if len(reply) > 500:
                 raise HTTPException(400, f"回复内容过长（≤500 字符）：{k[:16]}…")
+            cr_norm[k] = {"reply": reply, "groups": groups}
     for field, limit in (("qq_account", 40), ("onebot_url", 200),
                          ("onebot_token", 200), ("webui_url", 200),
                          ("webui_token", 200), ("official_app_id", 64),
                          ("official_app_secret", 128), ("template_on", 200),
-                         ("template_off", 200)):
+                         ("template_off", 200), ("ai_api_key", 128),
+                         ("ai_base_url", 200), ("ai_model", 64),
+                         ("ai_system_prompt", 1000)):
         v = getattr(body, field)
         if v is not None and len(v) > limit:
             raise HTTPException(400, f"{field} 过长（≤{limit} 字符）")
@@ -1695,15 +1844,31 @@ async def qq_notify_global_patch(body: QQNotifyGlobalIn, request: Request):
     if body.official_app_secret is not None:
         sets.append("official_app_secret = ?")
         vals.append(body.official_app_secret.strip())
-    if body.command_replies is not None:
+    if cr_norm is not None:
         sets.append("command_replies = ?")
-        vals.append(json.dumps(
-            {str(k).strip(): str(v).strip()
-             for k, v in body.command_replies.items()}, ensure_ascii=False))
+        vals.append(json.dumps(cr_norm, ensure_ascii=False))
     if body.notify_on is not None:
         sets.append("notify_on = ?"); vals.append(1 if body.notify_on else 0)
     if body.notify_off is not None:
         sets.append("notify_off = ?"); vals.append(1 if body.notify_off else 0)
+    if body.report_offline is not None:
+        sets.append("report_offline = ?")
+        vals.append(1 if body.report_offline else 0)
+    if body.ai_reply_enabled is not None:
+        sets.append("ai_reply_enabled = ?")
+        vals.append(1 if body.ai_reply_enabled else 0)
+    if body.ai_api_key is not None:
+        sets.append("ai_api_key = ?"); vals.append(body.ai_api_key.strip())
+    if body.ai_base_url is not None:
+        sets.append("ai_base_url = ?"); vals.append(body.ai_base_url.strip())
+    if body.ai_model is not None:
+        sets.append("ai_model = ?"); vals.append(body.ai_model.strip())
+    if body.ai_system_prompt is not None:
+        sets.append("ai_system_prompt = ?"); vals.append(body.ai_system_prompt.strip())
+    if body.ai_rate_limit is not None:
+        sets.append("ai_rate_limit = ?"); vals.append(int(body.ai_rate_limit))
+    if body.ai_rate_window is not None:
+        sets.append("ai_rate_window = ?"); vals.append(int(body.ai_rate_window))
     if body.template_on is not None:
         sets.append("template_on = ?"); vals.append(body.template_on)
     if body.template_off is not None:
@@ -1714,25 +1879,31 @@ async def qq_notify_global_patch(body: QQNotifyGlobalIn, request: Request):
         sets.append("updated_at = ?"); vals.append(now_iso())
         conn = connect()
         try:
-            conn.execute(f"UPDATE qq_notify_global SET {', '.join(sets)} "
-                         "WHERE id = 1", tuple(vals))
+            conn.execute(f"UPDATE qq_bots SET {', '.join(sets)} "
+                         "WHERE id = ?", tuple(vals + [int(bot_id)]))
             conn.commit()
         finally:
             conn.close()
-    return _qq_global_row()
+    return _qq_bot_row(bot_id)
 
 
 @app.get("/api/qq-notify/status")
-async def qq_notify_status(request: Request):
+async def qq_notify_status(request: Request, channel: str | None = Query(None),
+                           bot_id: int = Query(1)):
     """探测发送通道连通性（不抛错，结果进 body）。
 
+    v2.5.0 多机器人：?bot_id= 指定机器人（页面选择区切换）。
     v2.3.1 双通道：official=官方 API getAppAccessToken 探测（凭据有效性，
     2.5s 超时）；napcat=get_login_info（原逻辑）。
+    v2.4.0 可选 ?channel=napcat|official 指定探测通道（机器人管理页左右
+    通道板块各自的「测试连接」按钮）；不传按库中已保存通道探测。
     通知器未部署 / 协议端未启动时不可达属预期，前端以文案区分。"""
     check_admin(request)
-    g = _qq_global_row()
+    g = _qq_bot_row(bot_id)
+    ch = (channel if channel in ("napcat", "official")
+          else str(g.get("channel") or "napcat"))
 
-    if str(g.get("channel") or "napcat") == "official":
+    if ch == "official":
         app_id = (g.get("official_app_id") or "").strip()
         secret = (g.get("official_app_secret") or "").strip()
         if not app_id or not secret:
@@ -1838,8 +2009,10 @@ def _webui_call(g: dict, path: str, _retry: bool = True) -> dict:
 
 
 @app.get("/api/qq-notify/qrlogin")
-async def qq_notify_qrlogin(request: Request, refresh: bool = Query(False)):
-    """扫码登录聚合端点（前端约 2.5 秒轮询，v2.3 嵌入「开播账号管理」）。
+async def qq_notify_qrlogin(request: Request, refresh: bool = Query(False),
+                            bot_id: int = Query(1)):
+    """扫码登录聚合端点（前端约 2.5 秒轮询，v2.3 嵌入「开播账号管理」；
+    v2.5.0 起按 ?bot_id= 读取所选机器人的 WebUI 连接字段）。
 
     返回 {phase, qrcode, message}：
     - online：QQ 已登录（isLogin）；
@@ -1853,7 +2026,7 @@ async def qq_notify_qrlogin(request: Request, refresh: bool = Query(False)):
     RefreshQRcode 返回空 qrcodeurl，转 error 提示稍候。
     """
     check_admin(request)
-    g = _qq_global_row()
+    g = _qq_bot_row(bot_id)
     try:
         st = _webui_call(g, "/api/QQLogin/CheckLoginStatus")
         if st.get("isLogin"):
@@ -1892,9 +2065,19 @@ async def qq_notify_qrlogin(request: Request, refresh: bool = Query(False)):
 # 机器人"看见"这个群。
 # ---------------------------------------------------------------------------
 _BIND_TIMEOUT = 120.0   # 绑定会话最长等待（秒）
-# 进程内绑定会话状态（同一时刻仅一个会话；daemon 线程持有）
-_BIND: dict = {"state": "idle", "group_id": 0, "openid": "", "msg": "",
-               "alive": False}
+# 进程内绑定会话状态（v2.5.0 起按机器人隔离：同时刻每机器人仅一个会话；
+# daemon 线程持有）
+
+
+def _bind_state(bot_id: int) -> dict:
+    """取（或惰性建）某机器人的绑定会话状态字典。"""
+    if int(bot_id) not in _BINDS:
+        _BINDS[int(bot_id)] = {"state": "idle", "group_id": 0, "openid": "",
+                               "msg": "", "alive": False}
+    return _BINDS[int(bot_id)]
+
+
+_BINDS: dict[int, dict] = {}
 
 
 def _official_fetch_token(app_id: str, secret: str) -> str:
@@ -1921,9 +2104,10 @@ def _official_gateway(token: str) -> str:
     return str(body["url"])
 
 
-def _bind_worker(group_id: int, app_id: str, secret: str) -> None:
-    """绑定会话后台线程：临时 WebSocket 监听群事件，捕获即写库。"""
+def _bind_worker(bot_id: int, group_id: int, app_id: str, secret: str) -> None:
+    """绑定会话后台线程：临时 WebSocket 监听群事件，捕获即写库（该机器人维度）。"""
     import asyncio
+    b = _bind_state(bot_id)
 
     async def listen() -> str:
         import websockets
@@ -1964,84 +2148,121 @@ def _bind_worker(group_id: int, app_id: str, secret: str) -> None:
     try:
         openid = asyncio.run(asyncio.wait_for(listen(), _BIND_TIMEOUT + 30))
         if not openid:
-            _BIND.update(state="timeout", msg="等待超时（2 分钟内未捕获群事件），"
-                          "请确认已在目标群 @机器人或拉机器人进群后重试")
+            b.update(state="timeout", msg="等待超时（2 分钟内未捕获群事件），"
+                     "请确认已在目标群 @机器人或拉机器人进群后重试")
             return
         conn = connect()
         try:
             conn.execute(
-                """INSERT INTO qq_group_map (group_id, group_openid, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(group_id) DO UPDATE SET
+                """INSERT INTO qq_group_map (bot_id, group_id, group_openid, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(bot_id, group_id) DO UPDATE SET
                        group_openid = excluded.group_openid,
                        updated_at = excluded.updated_at""",
-                (group_id, openid.upper(), now_iso()))
+                (int(bot_id), group_id, openid.upper(), now_iso()))
             conn.commit()
         finally:
             conn.close()
-        _BIND.update(state="captured", openid=openid.upper(),
-                     msg=f"群 {group_id} 映射已绑定")
+        b.update(state="captured", openid=openid.upper(),
+                 msg=f"群 {group_id} 映射已绑定")
     except Exception as e:   # 凭据错/网络断/网关异常——会话失败可重试
-        _BIND.update(state="error", msg=f"绑定会话失败：{e}"[:160])
+        b.update(state="error", msg=f"绑定会话失败：{e}"[:160])
     finally:
-        _BIND["alive"] = False
+        b["alive"] = False
 
 
 class QQNotifyBindIn(BaseModel):
-    """绑定会话发起入参。"""
+    """绑定会话发起入参（v2.5.0 加 bot_id：为所选机器人绑定）。"""
     group_id: int
+    bot_id: int = 1
     token: str | None = None
 
 
 @app.post("/api/qq-notify/bind-group")
 async def qq_notify_bind_group(body: QQNotifyBindIn, request: Request):
-    """发起群映射绑定会话（official 专属；同时刻仅一个会话）。"""
+    """发起群映射绑定会话（official 专属；每机器人同时刻仅一个会话）。"""
     check_admin(request, body.token)
     if body.group_id <= 0:
         raise HTTPException(400, "群号须为正整数")
-    g = _qq_global_row()
+    g = _qq_bot_row(body.bot_id)
     if str(g.get("channel") or "napcat") != "official":
         raise HTTPException(400, "群映射绑定仅官方通道使用（「发送通道」切换）")
     app_id = (g.get("official_app_id") or "").strip()
     secret = (g.get("official_app_secret") or "").strip()
     if not app_id or not secret:
         raise HTTPException(400, "未配置官方机器人 AppID/AppSecret")
-    if _BIND["alive"]:
-        raise HTTPException(409, "已有绑定会话进行中，请先完成或等待其超时")
-    _BIND.update(state="waiting", group_id=body.group_id, openid="", msg="",
-                 alive=True)
+    b = _bind_state(body.bot_id)
+    if b["alive"]:
+        raise HTTPException(409, "该机器人已有绑定会话进行中，请先完成或等待其超时")
+    b.update(state="waiting", group_id=body.group_id, openid="", msg="",
+             alive=True)
     import threading
     threading.Thread(target=_bind_worker,
-                     args=(body.group_id, app_id, secret),
+                     args=(int(body.bot_id), body.group_id, app_id, secret),
                      daemon=True).start()
-    return {"ok": True, "group_id": body.group_id,
+    return {"ok": True, "group_id": body.group_id, "bot_id": int(body.bot_id),
             "timeout_sec": int(_BIND_TIMEOUT)}
 
 
 @app.get("/api/qq-notify/bind-status")
-async def qq_notify_bind_status(request: Request):
+async def qq_notify_bind_status(request: Request, bot_id: int = Query(1)):
     """绑定会话状态（前端 2.5s 轮询）：idle/waiting/captured/timeout/error。"""
     check_admin(request)
-    return {"state": _BIND["state"], "group_id": _BIND["group_id"],
-            "openid": _BIND["openid"], "message": _BIND["msg"]}
+    b = _bind_state(bot_id)
+    return {"state": b["state"], "group_id": b["group_id"],
+            "openid": b["openid"], "message": b["msg"]}
 
 
 @app.get("/api/qq-notify/group-map")
-async def qq_notify_group_map(request: Request):
-    """已绑定映射列表（群号 ↔ openid）。"""
+async def qq_notify_group_map(request: Request, bot_id: int = Query(1)):
+    """已绑定映射列表（群号 ↔ openid，含备注；v2.5.0 按机器人过滤）。"""
     check_admin(request)
-    rows = q("SELECT group_id, group_openid, updated_at FROM qq_group_map "
-             "ORDER BY group_id")
+    rows = q("SELECT group_id, group_openid, updated_at, remark "
+             "FROM qq_group_map WHERE bot_id = ? ORDER BY group_id",
+             (int(bot_id),))
     return {"items": [dict(r) for r in rows]}
 
 
+class QQGroupMapRemarkIn(BaseModel):
+    """群映射备注 PATCH 入参（v2.4.1，管理页行内编辑）。"""
+    remark: str
+    token: str | None = None
+
+
+@app.patch("/api/qq-notify/group-map/{group_id}")
+async def qq_notify_group_map_remark(group_id: int, body: QQGroupMapRemarkIn,
+                                     request: Request,
+                                     bot_id: int = Query(1)):
+    """编辑一个群映射的备注（仅管理员；仅备注列，不影响绑定关系——
+    重新绑定的 upsert 本就不触碰备注，解绑则整行删除；v2.5.0 按机器人）。"""
+    check_admin(request, body.token)
+    remark = body.remark.strip()
+    if len(remark) > 50:
+        raise HTTPException(400, "备注过长（≤50 字符）")
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "UPDATE qq_group_map SET remark = ? WHERE group_id = ? AND bot_id = ?",
+            (remark, group_id, int(bot_id)))
+        conn.commit()
+        changed = cur.rowcount
+    finally:
+        conn.close()
+    if not changed:
+        raise HTTPException(404, f"群 {group_id} 未绑定，无法编辑备注")
+    return {"ok": True, "group_id": group_id, "remark": remark}
+
+
 @app.delete("/api/qq-notify/group-map/{group_id}")
-async def qq_notify_group_map_delete(group_id: int, request: Request):
-    """解绑一个群映射（仅管理员；房间配置里的该群号将失去换算，发送跳过）。"""
+async def qq_notify_group_map_delete(group_id: int, request: Request,
+                                     bot_id: int = Query(1)):
+    """解绑一个群映射（仅管理员；房间配置里的该群号将失去换算，发送跳过；
+    v2.5.0 按机器人解绑）。"""
     check_admin(request)
     conn = connect()
     try:
-        conn.execute("DELETE FROM qq_group_map WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM qq_group_map WHERE group_id = ? AND bot_id = ?",
+                     (group_id, int(bot_id)))
         conn.commit()
     finally:
         conn.close()
@@ -2051,34 +2272,81 @@ async def qq_notify_group_map_delete(group_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # 群指令自动回复（v2.3.1，official 通道）：常驻事件监听
 # ---------------------------------------------------------------------------
-# 指令回复**出厂默认**（v2.3.1）：库中 command_replies 为空对象时生效
-# （「清空并保存=恢复默认」）；页面键值对编辑的内容存库覆盖本表。
-QQ_COMMAND_REPLIES: dict[str, str] = {
-    "/连接": "✅ 开播通知服务在线（官方通道直连，无需扫码登录）",
+# 指令回复**出厂默认**（v2.3.1；v2.4.1 值结构升级）：库中 command_replies 为
+# 空对象时生效（「清空并保存=恢复默认」）；页面编辑的内容存库覆盖本表。
+# v2.4.1 起每条指令 = {"reply": 回复文本, "groups": [生效群号]}，groups 为空
+# 列表 = 全部群生效（兼容 v2.3.1 旧库的纯字符串值，读取时按全部群归一）。
+QQ_COMMAND_REPLIES: dict[str, dict] = {
+    "/连接": {"reply": "✅ 开播通知服务在线（官方通道直连，无需扫码登录）",
+              "groups": []},
 }
 
-# 简易频控：openid → 最近回复时间戳；每群每分钟最多 5 次（防刷指令，
-# 被动回复平台侧另有 5 分钟/条约束，此处避免高频触发频控错误码）
+# 简易频控（v2.5.0 起键含机器人）："{bot_id}:{openid}" → 最近回复时间戳；
+# 每群每分钟最多 5 次（防刷指令，被动回复平台侧另有 5 分钟/条约束，
+# 此处避免高频触发频控错误码）
 _cmd_rates: dict[str, list[float]] = {}
 _CMD_RATE_LIMIT = 5
 _CMD_RATE_WINDOW = 60.0
 
 
+def _norm_command_table(replies: dict | None) -> dict[str, dict]:
+    """任意来源的指令表归一为 {指令: {"reply": str, "groups": [int]}}。
+
+    来源三态：None/空 dict → 出厂默认表（「清空=恢复默认」的生效口径）；
+    v2.3.1 旧格式（值为纯字符串）→ groups 置空（= 全部群，行为与旧版一致）；
+    v2.4.1 新格式（值为 {reply, groups}）→ 逐字段转平。库读/出厂默认/页面
+    PATCH 存量都走这里，保证事件中枢与 GET 端点看到同一形状。
+    """
+    table = replies if replies else QQ_COMMAND_REPLIES
+    out: dict[str, dict] = {}
+    for k, v in table.items():
+        if isinstance(v, dict):
+            try:
+                groups = [int(x) for x in (v.get("groups") or [])]
+            except (TypeError, ValueError):
+                groups = []
+            out[str(k)] = {"reply": str(v.get("reply") or ""), "groups": groups}
+        else:
+            out[str(k)] = {"reply": str(v), "groups": []}
+    return out
+
+
 def match_command_reply(content: str,
-                        replies: dict[str, str] | None = None) -> str:
+                        replies: dict | None = None) -> tuple[str, list[int]] | None:
     """@消息正文匹配指令表：去掉 @机器人 前缀（<@!BOTID>）后精确匹配。
 
-    replies 为空/None 时用出厂默认表；纯函数便于单测。
+    replies 为空/None 时用出厂默认表；兼容新旧两种值格式（经
+    _norm_command_table 归一）。命中返回 (回复文本, 生效群号列表)，groups
+    为空列表 = 全部群生效；未命中返回 None。纯函数便于单测——群号→openid
+    的换算不在此做（须查 qq_group_map，见事件中枢 _group_openids_for）。
     """
     text = _re.sub(r"<@!\d+>", "", content or "").strip()
-    return (replies if replies else QQ_COMMAND_REPLIES).get(text, "")
+    e = _norm_command_table(replies).get(text)
+    return (e["reply"], e["groups"]) if e and e["reply"] else None
 
 
-def _reply_group_text(group_openid: str, content: str, msg_id: str) -> None:
-    """被动回复一条群消息（带 msg_id，5 分钟内有效；同步 urllib 跑线程池）。"""
-    g = _qq_global_row()
-    token = _official_fetch_token((g.get("official_app_id") or "").strip(),
-                                  (g.get("official_app_secret") or "").strip())
+def _group_openids_for(bot_id: int, group_ids: list[int]) -> set[str]:
+    """指令限定群号 → openid 集合（查该机器人的 qq_group_map 绑定行）。
+
+    未绑定的群号换不出 openid → 永不命中（页面下拉本身只列已绑定群，
+    正常流程不会出现；解绑后限定指令静默失效，口径与房间通知一致）。
+    """
+    if not group_ids:
+        return set()
+    ph = ",".join("?" * len(group_ids))
+    rows = q(f"SELECT group_openid FROM qq_group_map "
+             f"WHERE bot_id = ? AND group_id IN ({ph})",
+             tuple([int(bot_id)] + [int(x) for x in group_ids]))
+    return {str(r["group_openid"]) for r in rows}
+
+
+def _reply_group_text(bot: dict, group_openid: str, content: str,
+                      msg_id: str) -> None:
+    """被动回复一条群消息（带 msg_id，5 分钟内有效；同步 urllib 跑线程池）。
+
+    v2.5.0：凭据取自所选机器人档案。"""
+    token = _official_fetch_token((bot.get("official_app_id") or "").strip(),
+                                  (bot.get("official_app_secret") or "").strip())
     req = _urlreq.Request(
         _OFFICIAL_API + f"/v2/groups/{group_openid}/messages",
         data=json.dumps({"msg_type": 0, "content": content,
@@ -2089,89 +2357,391 @@ def _reply_group_text(group_openid: str, content: str, msg_id: str) -> None:
         resp.read()
 
 
-async def _official_event_loop(stop: asyncio.Event) -> None:
-    """official 通道事件中枢（lifespan 常驻任务）。
+# ---------------------------------------------------------------------------
+# AI 智能回复（v2.5.0，official 事件中枢）：@消息未命中指令表时的 LLM 兜底
+# ---------------------------------------------------------------------------
+# 走 OpenAI Chat Completions 兼容协议（POST {base}/chat/completions，Bearer
+# 鉴权），base/model/key 全在机器人档案 qq_bots（页面编辑）。默认 = 智谱标准
+# API + glm-4.5-flash（长期免费、128K 上下文）；要试 GLM Coding Plan 的 key
+# 就把接口地址改成 https://open.bigmodel.cn/api/coding/paas/v4 ——官方 FAQ
+# 口径套餐额度仅限指定编码工具、自建机器人不在内（可能报 1113 或转按量
+# 计费），属用户自担的实测选项，故不作默认。
+_AI_DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"
+_AI_DEFAULT_MODEL = "glm-4.5-flash"
+_AI_DEFAULT_SYSTEM = (
+    "你是直播间 QQ 群里的通知机器人，平时负责开播/下播通知。群友 @你提问时，"
+    "用简短友好的中文口语回答（两三句话以内），不确定就坦率说明。")
 
-    周期检查全局配置（official 且凭据齐）→ 建立 WebSocket 订阅群事件 →
-    GROUP_AT_MESSAGE_CREATE 命中指令表即以 msg_id 被动回复；配置不满足
-    （未切通道/凭据空）时静默等待，通道切回/凭据变更 30s 内自动跟随
-    （连接每 30s 无事件即重查配置）。异常断开 30s 退避重连。
-    绑定会话（bind-group）为独立临时连接，与本任务互不影响。
+# AI 兜底独立频控（比指令 5 次/分更严：LLM 生成有成本、群内刷屏观感差）：
+# openid → 最近调用时间戳，计次发生在调用前。**限额与窗口从库配置读**
+# （机器人管理页 AI 板块，2026-10-18 用户定稿从代码常量升级为配置项），
+# 下面两个常量只是库值缺失/脏值时的回退默认
+_ai_rates: dict[str, list[float]] = {}
+_AI_RATE_LIMIT = 3
+_AI_RATE_WINDOW = 300.0
+
+
+def _cfg_int(v, default: int) -> int:
+    """库中配置值 → int（None/脏值回退默认；频控等页面可调项共用）。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+# 生成失败后的重试间隔（重试 1 次；2026-10-18 本地实测 20s 读超时为瞬时
+# 网络抖动，同参直调 2s 即成功——对齐通知器「单条失败重试 1 次」惯例）
+_AI_RETRY_WAIT = 5.0
+
+
+def _ai_live_context() -> str:
+    """实时开播状态一行（拼进 system prompt，让机器人能答「谁在播」）。
+
+    共享库 rooms JOIN live_sessions（end_time IS NULL=在播，capture 写入）；
+    查询失败（表缺失/库忙等）返回空串降级——AI 回复不因状态行缺失而中断。
     """
-    import websockets
+    try:
+        rows = q("""SELECT r.anchor_name FROM rooms r
+                    JOIN live_sessions s ON s.room_id = r.room_id
+                    WHERE s.end_time IS NULL AND r.enabled = 1
+                    ORDER BY s.start_time""")
+        names = [str(r["anchor_name"]).strip() for r in rows]
+        names = [n for n in names if n]
+    except Exception:
+        return ""
+    if not names:
+        return "\n\n【实时状态】当前没有主播在播。"
+    return "\n\n【实时状态】当前开播：" + "、".join(names) + "。"
 
-    async def serve_once() -> None:
-        g = _qq_global_row()
-        token = _official_fetch_token((g.get("official_app_id") or "").strip(),
-                                      (g.get("official_app_secret") or "").strip())
-        ws_url = _official_gateway(token)
-        async with websockets.connect(ws_url) as ws:
-            hello = json.loads(await asyncio.wait_for(ws.recv(), 15))
-            if hello.get("op") != 10:
-                raise RuntimeError(f"网关首帧异常 op={hello.get('op')}")
-            interval = hello["d"]["heartbeat_interval"] / 1000
 
-            async def heartbeat() -> None:
-                while True:
-                    await asyncio.sleep(interval)
-                    await ws.send(json.dumps({"op": 1, "d": None}))
+def _ai_reply_text(text: str, g: dict) -> str:
+    """调 LLM 生成回复（同步 urllib，事件中枢经 to_thread 跑线程池）。
 
-            hb = asyncio.create_task(heartbeat())
+    g 为机器人档案（_qq_bot_row）结果：base_url/model/system_prompt 空串
+    走内置默认；只发送 @ 正文文本（不含用户身份信息，最小化三方披露）。
+    max_tokens=300 / 回复截断 800 字（QQ 群消息长度余量）；读超时 40s
+    （2026-10-18 实测平台偶发慢，20s 偏紧；被动回复窗口 5 分钟余量充足）。
+    任何网络/解析异常向上抛，由 _maybe_ai_reply 记日志重试后静默放弃。
+    """
+    base = ((g.get("ai_base_url") or "").strip().rstrip("/")
+            or _AI_DEFAULT_BASE)
+    model = (g.get("ai_model") or "").strip() or _AI_DEFAULT_MODEL
+    system = (g.get("ai_system_prompt") or "").strip() or _AI_DEFAULT_SYSTEM
+    payload = {"model": model, "max_tokens": 300, "messages": [
+        {"role": "system", "content": system + _ai_live_context()},
+        {"role": "user", "content": text}]}
+    req = _urlreq.Request(
+        base + "/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + str(g.get("ai_api_key") or "").strip()},
+        method="POST")
+    with _urlreq.urlopen(req, timeout=40.0) as resp:
+        data = json.loads(resp.read())
+    content = str(((data.get("choices") or [{}])[0].get("message") or {})
+                  .get("content") or "").strip()
+    return content[:800]
+
+
+async def _maybe_ai_reply(bot: dict, d: dict) -> None:
+    """AI 兜底门控与发送（事件中枢在指令未命中时调用；v2.5.0 按机器人档案）。
+
+    门控四道：机器人开关开 + api_key 非空 + 剥 @ 前缀后正文非空 + 频控内
+    （每群 300s/3 次，计次在 LLM 调用前防并发突破；频控键含机器人）。
+    LLM 生成失败隔 5s 重试一次（专治瞬时网络抖动，2026-10-18 实测案例）；
+    生成与被动回复各 45s/40s 超时，被动回复窗口（msg_id 5 分钟有效）足够
+    容纳；任何失败仅打日志不兜底文案（宁漏勿扰）。静默分支（空正文/频控/
+    空回复）各记一行日志，便于「没回复」排查。
+    """
+    if not bot.get("ai_reply_enabled") or not (bot.get("ai_api_key") or "").strip():
+        return
+    text = _re.sub(r"<@!\d+>", "", str(d.get("content") or "")).strip()
+    if not text:
+        print("[qq-notify] AI 跳过:@正文为空(纯@无文字)", flush=True)
+        return
+    oid = str(d.get("group_openid") or "")
+    rk = f"{bot['id']}:{oid}"
+    limit = _cfg_int(bot.get("ai_rate_limit"), _AI_RATE_LIMIT)
+    window = _cfg_int(bot.get("ai_rate_window"), _AI_RATE_WINDOW)
+    now = time.time()
+    recent = [x for x in _ai_rates.get(rk, []) if now - x < window]
+    if len(recent) >= limit:
+        print(f"[qq-notify] AI 跳过:群 {oid[:8]}…频控"
+              f"(每 {window}s 限 {limit} 次)", flush=True)
+        return
+    recent.append(now)
+    _ai_rates[rk] = recent
+    reply, err = "", None
+    for attempt in (1, 2):
+        try:
+            reply = await asyncio.wait_for(
+                asyncio.to_thread(_ai_reply_text, text, bot), 45)
+            break
+        except Exception as e:
+            err = e
+            print(f"[qq-notify] AI 回复生成失败(第 {attempt} 次): {e}", flush=True)
+            if attempt == 1:
+                await asyncio.sleep(_AI_RETRY_WAIT)
+    if not reply:
+        if err is None:
+            print("[qq-notify] AI 跳过:模型返回空内容", flush=True)
+        return
+    try:
+        await asyncio.to_thread(_reply_group_text, bot, oid, reply,
+                                str(d.get("id") or ""))
+    except Exception as e:
+        print(f"[qq-notify] AI 回复发送失败: {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 入群申请核查（v2.5.0，official 专属）：GROUP_JOIN_REQUEST 事件 → 答案当
+# B站ID → 查共享库粉丝牌与近5条弹幕 → 发到开启开关的主播配置群。
+# 前置：机器人须为该群**管理员**才能收到该事件（官方文档口径，页面提示）。
+# 不做自动审批（approval 接口属白名单权限）；数据全部来自采集库，不调B站。
+# ---------------------------------------------------------------------------
+def _join_answer(d: dict) -> str:
+    """从 GROUP_JOIN_REQUEST 事件提取申请人填写的验证内容。
+
+    verify_info.method=admin_review_qa（加群问题）→ review_qa_list[].answer
+    拼接（"；"分隔）；verify_message（验证消息）→ 原文；均空返回空串。
+    """
+    vi = d.get("verify_info") or {}
+    if vi.get("method") == "admin_review_qa":
+        answers = [str(qa.get("answer") or "").strip()
+                   for qa in (vi.get("review_qa_list") or [])]
+        return "；".join(a for a in answers if a)
+    return str(vi.get("verify_message") or "").strip()
+
+
+def _join_lookup(room_id: int, answer: str) -> dict:
+    """按B站ID查该房间该用户的最新粉丝牌与最近 5 条弹幕（共享采集库）。
+
+    纯数字按 uid 匹配、否则按 uname 精确；数字无命中时回退按 uname 再查
+    （答案也可能填的是昵称）。返回 {matched, medal_name, medal_level,
+    uname, danmaku:[(ts, text)]}。
+    """
+    uid = int(answer) if answer.isdigit() else None
+
+    def _hit(col_val, param):
+        where = "uid = ?" if col_val == "uid" else "uname = ?"
+        dm = q(f"""SELECT uname, text, ts FROM danmaku WHERE room_id = ?
+                   AND {where} ORDER BY id DESC LIMIT 5""", (room_id, param))
+        med = q1(f"""SELECT uname, medal_name, medal_level FROM danmaku
+                     WHERE room_id = ? AND {where}
+                     AND TRIM(medal_name) != '' ORDER BY id DESC LIMIT 1""",
+                 (room_id, param))
+        return dm, med
+
+    dm, med = _hit("uid" if uid is not None else "uname",
+                   uid if uid is not None else answer)
+    if not dm and not med and uid is not None:   # 数字ID无命中 → 回退昵称
+        dm, med = _hit("uname", answer)
+    uname = str((med or {}).get("uname")
+                or (dm[0].get("uname") if dm else ""))
+    return {
+        "matched": bool(dm or med),
+        "medal_name": str((med or {}).get("medal_name") or ""),
+        "medal_level": int((med or {}).get("medal_level") or 0),
+        "uname": uname,
+        "danmaku": [(str(r["ts"]), str(r["text"]))
+                    for r in (dm or [])],
+    }
+
+
+def _bot_send_active_text(bot: dict, openid: str, content: str) -> None:
+    """以主动消息发群文本（无 msg_id；占每群 1000 条/天主动额度，低频可忽略）。"""
+    token = _official_fetch_token((bot.get("official_app_id") or "").strip(),
+                                  (bot.get("official_app_secret") or "").strip())
+    req = _urlreq.Request(
+        _OFFICIAL_API + f"/v2/groups/{openid}/messages",
+        data=json.dumps({"msg_type": 0, "content": content}).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"QQBot {token}"}, method="POST")
+    with _urlreq.urlopen(req, timeout=5.0) as resp:
+        resp.read()
+
+
+async def _handle_join_request(bot: dict, d: dict) -> None:
+    """入群申请核查主流程（事件中枢 GROUP_JOIN_REQUEST 分发）。
+
+    定位目标主播：join_check 开启且群列表包含事件来源群（openid 经该机器
+    人映射反查）的房间；对每个房间独立查牌/查弹幕并**发到该房间配置的全
+    部群**（官方通道经映射换 openid）。任何失败仅日志，不影响其他房间。
+    """
+    answer = _join_answer(d)
+    username = str(d.get("username") or "").strip() or "（未知昵称）"
+    oid = str(d.get("group_openid") or "")
+    if not oid:
+        return
+    if not answer:
+        print(f"[qq-notify] 入群核查跳过:申请人 {username} 未填验证内容",
+              flush=True)
+        return
+    rows = q("SELECT group_id FROM qq_group_map WHERE bot_id = ? "
+             "AND group_openid = ?", (int(bot["id"]), oid))
+    src_gids = {int(r["group_id"]) for r in rows}
+    if not src_gids:
+        print(f"[qq-notify] 入群核查跳过:来源群 openid={oid[:8]}… 未在"
+              f"机器人 {bot['id']} 绑定映射", flush=True)
+        return
+
+    targets: list[tuple[int, str, list[int]]] = []
+    for row in q("""SELECT n.room_id, n.group_ids, r.anchor_name
+                    FROM qq_notify n JOIN rooms r ON r.room_id = n.room_id
+                    WHERE n.enabled = 1 AND n.join_check = 1
+                      AND r.enabled = 1"""):
+        try:
+            gids = [int(x) for x in json.loads(row["group_ids"])]
+        except (ValueError, TypeError):
+            continue
+        if src_gids & set(gids):
+            targets.append((int(row["room_id"]),
+                            str(row["anchor_name"] or ""), gids))
+    if not targets:
+        return   # 无开启核查的主播命中该群：静默（非该功能管辖的群）
+
+    gmap = {int(r["group_id"]): str(r["group_openid"])
+            for r in q("SELECT group_id, group_openid FROM qq_group_map "
+                       "WHERE bot_id = ?", (int(bot["id"]),))}
+    for room_id, anchor, gids in targets:
+        lk = _join_lookup(room_id, answer)
+        lines = [f"🔍 入群申请核查（{anchor}）",
+                 f"申请人：{username}",
+                 f"验证回答：{answer}"]
+        if lk["matched"]:
+            medal = (f"{lk['medal_name']} Lv.{lk['medal_level']}"
+                     if lk["medal_name"] else "未佩戴粉丝牌")
+            lines.append(f"粉丝牌：{medal}"
+                         + (f"（最近发言昵称：{lk['uname']}）" if lk["uname"] else ""))
+            if lk["danmaku"]:
+                lines.append("近期弹幕：")
+                for ts, text in lk["danmaku"]:
+                    lines.append(f"· {(ts or '')[5:16]} {text[:40]}")
+            else:
+                lines.append("近期弹幕：无记录")
+        else:
+            lines.append("粉丝牌：未查到该B站ID在本直播间的任何弹幕/粉丝牌记录")
+        content = "\n".join(lines)[:1500]
+        for gid in gids:
+            toid = gmap.get(gid)
+            if not toid:
+                print(f"[qq-notify] 入群核查:房间 {room_id} 群 {gid} 未绑定"
+                      f"openid(机器人 {bot['id']}),跳过该群", flush=True)
+                continue
             try:
-                await ws.send(json.dumps({"op": 2, "d": {
-                    "token": f"QQBot {token}", "intents": 1 << 25,
-                    "shard": [0, 1], "properties": {}}}))
-                while not stop.is_set():
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), 30)
-                    except asyncio.TimeoutError:
-                        # 静默期重查配置：通道切回/凭据清空 → 断开等待
-                        cur = _qq_global_row()
-                        if (str(cur.get("channel") or "napcat") != "official"
-                                or not (cur.get("official_app_id") or "").strip()):
-                            return
-                        continue
-                    frame = json.loads(raw)
-                    if frame.get("op") != 0:
-                        continue
-                    if frame.get("t") != "GROUP_AT_MESSAGE_CREATE":
-                        continue   # 绑定捕获走独立会话，此处只管指令回复
-                    d = frame.get("d") or {}
-                    # 指令表每条事件读库（页面保存后即时生效，无需重启）
-                    reply = match_command_reply(
-                        str(d.get("content") or ""),
-                        _qq_global_row().get("command_replies"))
-                    if not reply:
-                        continue
-                    oid = str(d.get("group_openid") or "")
-                    now = time.time()
-                    recent = [x for x in _cmd_rates.get(oid, [])
-                              if now - x < _CMD_RATE_WINDOW]
-                    if len(recent) >= _CMD_RATE_LIMIT:
-                        continue
-                    recent.append(now)
-                    _cmd_rates[oid] = recent
-                    try:
-                        await asyncio.to_thread(
-                            _reply_group_text, oid, reply, str(d.get("id") or ""))
-                    except Exception as e:
-                        print(f"[qq-notify] 指令回复发送失败: {e}", flush=True)
-            finally:
-                hb.cancel()
-                try:
-                    await asyncio.gather(hb, return_exceptions=True)
-                except Exception:
-                    pass
+                await asyncio.to_thread(_bot_send_active_text, bot, toid, content)
+                print(f"[qq-notify] 入群核查已发:房间 {room_id} → 群 {gid}",
+                      flush=True)
+            except Exception as e:
+                print(f"[qq-notify] 入群核查发送失败(房间 {room_id} 群 {gid}):"
+                      f" {e}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# official 通道事件中枢（v2.5.0 多机器人）：每个凭据齐的 official 机器人
+# 一条独立 WebSocket；外层 30s 对账增删连接（页面新建/切走/改凭据下一
+# 周期生效），内层静默期自查凭据变更即断开交外层重建。
+# ---------------------------------------------------------------------------
+_bot_ws_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _bot_event_serve(stop: asyncio.Event, bot_id: int) -> None:
+    """单个机器人的常驻事件连接：指令回复 + AI 兜底 + 入群申请核查。"""
+    import websockets
 
     while not stop.is_set():
         try:
-            g = _qq_global_row()
-            if (str(g.get("channel") or "napcat") == "official"
-                    and (g.get("official_app_id") or "").strip()
-                    and (g.get("official_app_secret") or "").strip()):
-                await serve_once()
+            b = _qq_bot_row(bot_id)
+            app_id = (b.get("official_app_id") or "").strip()
+            secret = (b.get("official_app_secret") or "").strip()
+            if not app_id or not secret:
+                return
+            token = _official_fetch_token(app_id, secret)
+            ws_url = _official_gateway(token)
+            async with websockets.connect(ws_url) as ws:
+                hello = json.loads(await asyncio.wait_for(ws.recv(), 15))
+                if hello.get("op") != 10:
+                    raise RuntimeError(f"网关首帧异常 op={hello.get('op')}")
+                interval = hello["d"]["heartbeat_interval"] / 1000
+
+                async def heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(interval)
+                        await ws.send(json.dumps({"op": 1, "d": None}))
+
+                hb = asyncio.create_task(heartbeat())
+                try:
+                    await ws.send(json.dumps({"op": 2, "d": {
+                        "token": f"QQBot {token}",
+                        # GROUP_AND_C2C_EVENT(1<<25,@消息) |
+                        # GROUP_MEMBER_EVENT(1<<24,入群申请)
+                        "intents": (1 << 25) | (1 << 24),
+                        "shard": [0, 1], "properties": {}}}))
+                    while not stop.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), 30)
+                        except asyncio.TimeoutError:
+                            # 静默期自查：通道切走/凭据变更 → 断开交外层重建
+                            cur = _qq_bot_row(bot_id)
+                            if (str(cur.get("channel") or "napcat") != "official"
+                                    or (cur.get("official_app_id") or "").strip()
+                                    != app_id):
+                                return
+                            continue
+                        frame = json.loads(raw)
+                        if frame.get("op") != 0:
+                            continue
+                        t = frame.get("t")
+                        d = frame.get("d") or {}
+                        if t != "GROUP_AT_MESSAGE_CREATE":
+                            # 非@消息事件打类型日志(入群申请排查用;低频事件,
+                            # 常开无刷屏风险)
+                            print(f"[qq-notify] 事件中枢收到事件: {t} "
+                                  f"(bot {bot_id})", flush=True)
+                        if t == "GROUP_AT_MESSAGE_CREATE":
+                            # 指令表每条事件读库（页面保存后即时生效，无需重启）
+                            entry = match_command_reply(
+                                str(d.get("content") or ""),
+                                _qq_bot_row(bot_id).get("command_replies"))
+                            if entry:
+                                reply, cmd_groups = entry
+                                oid = str(d.get("group_openid") or "")
+                                # v2.4.1 指令限定群：限定非空时,事件来源群
+                                #（openid 经该机器人映射反查)不在集合内不回复
+                                if (cmd_groups
+                                        and oid not in _group_openids_for(
+                                            bot_id, cmd_groups)):
+                                    continue
+                                now = time.time()
+                                rk = f"{bot_id}:{oid}"
+                                recent = [x for x in _cmd_rates.get(rk, [])
+                                          if now - x < _CMD_RATE_WINDOW]
+                                if len(recent) >= _CMD_RATE_LIMIT:
+                                    continue
+                                recent.append(now)
+                                _cmd_rates[rk] = recent
+                                try:
+                                    await asyncio.to_thread(
+                                        _reply_group_text, b, oid, reply,
+                                        str(d.get("id") or ""))
+                                except Exception as e:
+                                    print(f"[qq-notify] 指令回复发送失败: {e}",
+                                          flush=True)
+                            else:
+                                # v2.5.0：未命中指令 → AI 兜底（开关开+key
+                                # 配好+频控内才真正调 LLM；指令命中永远优先）
+                                await _maybe_ai_reply(_qq_bot_row(bot_id), d)
+                        elif t == "GROUP_JOIN_REQUEST":
+                            await _handle_join_request(_qq_bot_row(bot_id), d)
+                finally:
+                    hb.cancel()
+                    try:
+                        await asyncio.gather(hb, return_exceptions=True)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            print(f"[qq-notify] 事件监听断开，30s 后重试: {e}", flush=True)
+            print(f"[qq-notify] 机器人{bot_id} 事件监听断开，30s 后重试: {e}",
+                  flush=True)
         if stop.is_set():
             break
         try:
@@ -2180,8 +2750,44 @@ async def _official_event_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _official_event_loop(stop: asyncio.Event) -> None:
+    """official 通道事件中枢（lifespan 常驻任务；v2.5.0 多机器人对账）。
+
+    每 30s 查一次 qq_bots：official 且凭据齐的机器人各起一条
+    _bot_event_serve 连接；不再满足条件（通道切回 napcat/凭据清空/任务
+    已退出）的连接取消移除。绑定会话（bind-group）为独立临时连接，不受
+    本任务管理。
+    """
+    while not stop.is_set():
+        try:
+            rows = q("""SELECT id FROM qq_bots WHERE channel = 'official'
+                        AND TRIM(official_app_id) != ''
+                        AND TRIM(official_app_secret) != ''""")
+            want = {int(r["id"]) for r in rows}
+            for bid in want - set(_bot_ws_tasks):
+                _bot_ws_tasks[bid] = asyncio.create_task(
+                    _bot_event_serve(stop, bid))
+            for bid, t in list(_bot_ws_tasks.items()):
+                if bid not in want or t.done():
+                    t.cancel()
+                    del _bot_ws_tasks[bid]
+        except Exception as e:
+            print(f"[qq-notify] 事件中枢对账异常: {e}", flush=True)
+        try:
+            await asyncio.wait_for(stop.wait(), 30)
+        except asyncio.TimeoutError:
+            pass
+    for t in _bot_ws_tasks.values():
+        t.cancel()
+    _bot_ws_tasks.clear()
+
+
 def _qq_room_payload(room_id: int) -> dict:
-    """房间级配置 + 全局模板与通道（后两者给前端做占位提示/动态 label）。"""
+    """房间级配置 + 机器人模板与通道（后两者给前端做占位提示/动态 label）。
+
+    v2.4.0：个人配置四键（notify_on/notify_off/report_offline/debounce_offline）
+    三态透出——null=跟随全局，true/false=本房间覆盖。
+    v2.5.0：join_check 入群核查开关、bot_id 所属机器人（null=默认机器人1）。"""
     if not q1("SELECT room_id FROM rooms WHERE room_id = ?", (room_id,)):
         raise HTTPException(404, "房间不存在")
     row = q1("SELECT * FROM qq_notify WHERE room_id = ?", (room_id,))
@@ -2189,26 +2795,45 @@ def _qq_room_payload(room_id: int) -> dict:
         groups = json.loads(row["group_ids"]) if row else []
     except (ValueError, TypeError):
         groups = []
-    g = _qq_global_row()
+    bot = _qq_bot_row(int(row["bot_id"]) if row and row["bot_id"] else 1)
+
+    def opt(key):
+        v = row[key] if row else None
+        return None if v is None else bool(v)
+
     return {
         "room_id": room_id,
         "enabled": bool(row["enabled"]) if row else False,
         "group_ids": [int(x) for x in groups],
         "template_on": (row["template_on"] if row else "") or "",
         "template_off": (row["template_off"] if row else "") or "",
-        "global_template_on": g["template_on"],
-        "global_template_off": g["template_off"],
-        "channel": str(g.get("channel") or "napcat"),  # v2.3.1 官方通道下提示群号需先绑定映射
+        "notify_on": opt("notify_on"),
+        "notify_off": opt("notify_off"),
+        "report_offline": opt("report_offline"),
+        "debounce_offline": (int(row["debounce_offline"])
+                             if row and row["debounce_offline"] is not None else None),
+        "join_check": bool(row["join_check"]) if row else False,
+        "bot_id": (int(row["bot_id"]) if row and row["bot_id"] else None),
+        "global_template_on": bot["template_on"],
+        "global_template_off": bot["template_off"],
+        "channel": str(bot.get("channel") or "napcat"),  # v2.3.1 官方通道下提示群号需先绑定映射
     }
 
 
 class QQNotifyRoomIn(BaseModel):
-    """房间级配置 PATCH 体（全字段可选；群列表传全量覆盖）。
-    两通道统一填 QQ 群号（official 发送前经 qq_group_map 换 openid）。"""
+    """房间级配置 PATCH 体（群列表传全量覆盖；个人配置三态：
+    字段缺省=不动；null=恢复跟随全局；值=本房间覆盖。
+    v2.5.0：join_check 二态开关；bot_id null=恢复默认机器人1）。"""
     enabled: bool | None = None
     group_ids: list[int] | None = None
     template_on: str | None = None
     template_off: str | None = None
+    notify_on: bool | None = None
+    notify_off: bool | None = None
+    report_offline: bool | None = None
+    debounce_offline: int | None = None
+    join_check: bool | None = None
+    bot_id: int | None = None
     token: str | None = None
 
 
@@ -2220,7 +2845,10 @@ async def qq_notify_room_get(room_id: int):
 
 @app.patch("/api/rooms/{room_id}/qq-notify")
 async def qq_notify_room_patch(room_id: int, body: QQNotifyRoomIn, request: Request):
-    """更新房间级通知配置（UPSERT 整行；仅管理员）。"""
+    """更新房间级通知配置（UPSERT 整行；仅管理员）。
+
+    个人配置三态：字段出现且为 null=恢复跟随全局（落 NULL）；出现且带值=
+    本房间覆盖；未出现=保持库中现值（model_fields_set 区分缺省与 null）。"""
     check_admin(request, body.token)
     if not q1("SELECT room_id FROM rooms WHERE room_id = ?", (room_id,)):
         raise HTTPException(404, "房间不存在")
@@ -2233,6 +2861,12 @@ async def qq_notify_room_patch(room_id: int, body: QQNotifyRoomIn, request: Requ
         v = getattr(body, field)
         if v is not None and len(v) > 200:
             raise HTTPException(400, f"{field} 过长（≤200 字符）")
+    if (body.debounce_offline is not None
+            and not 0 <= body.debounce_offline <= 86400):
+        raise HTTPException(400, "防抖秒数须在 0~86400 之间")
+    if "bot_id" in body.model_fields_set and body.bot_id is not None \
+            and not q1("SELECT id FROM qq_bots WHERE id = ?", (body.bot_id,)):
+        raise HTTPException(400, f"机器人 {body.bot_id} 不存在")
 
     # 与库中现值合并（PATCH 语义：未传字段不动）
     cur = q1("SELECT * FROM qq_notify WHERE room_id = ?", (room_id,)) or {}
@@ -2245,22 +2879,95 @@ async def qq_notify_room_patch(room_id: int, body: QQNotifyRoomIn, request: Requ
     tpl_off = body.template_off if body.template_off is not None \
         else (cur.get("template_off", "") or "")
 
+    provided = body.model_fields_set
+
+    def tri(key: str, cast):
+        if key in provided:
+            v = getattr(body, key)
+            return None if v is None else cast(v)
+        return cur.get(key)
+
+    ov_on = tri("notify_on", lambda v: 1 if v else 0)
+    ov_off = tri("notify_off", lambda v: 1 if v else 0)
+    ov_report = tri("report_offline", lambda v: 1 if v else 0)
+    ov_debounce = tri("debounce_offline", int)
+    ov_join = tri("join_check", lambda v: 1 if v else 0)
+    if ov_join is None:
+        ov_join = 0   # NOT NULL 列:新建行默认关
+    # bot_id：null=恢复默认机器人（落 NULL）；值=归属该机器人；缺省=不动
+    ov_bot = (None if body.bot_id is None else int(body.bot_id)) \
+        if "bot_id" in provided else cur.get("bot_id")
+
     conn = connect()
     try:
         conn.execute(
             """INSERT INTO qq_notify (room_id, enabled, group_ids,
-                                      template_on, template_off, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+                                      template_on, template_off,
+                                      notify_on, notify_off, report_offline,
+                                      debounce_offline, join_check, bot_id,
+                                      updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(room_id) DO UPDATE SET
                    enabled = excluded.enabled, group_ids = excluded.group_ids,
                    template_on = excluded.template_on,
                    template_off = excluded.template_off,
+                   notify_on = excluded.notify_on,
+                   notify_off = excluded.notify_off,
+                   report_offline = excluded.report_offline,
+                   debounce_offline = excluded.debounce_offline,
+                   join_check = excluded.join_check,
+                   bot_id = excluded.bot_id,
                    updated_at = excluded.updated_at""",
-            (room_id, enabled, group_ids_json, tpl_on, tpl_off, now_iso()))
+            (room_id, enabled, group_ids_json, tpl_on, tpl_off,
+             ov_on, ov_off, ov_report, ov_debounce, ov_join, ov_bot, now_iso()))
         conn.commit()
     finally:
         conn.close()
     return _qq_room_payload(room_id)
+
+
+@app.get("/api/qq-notify/rooms")
+async def qq_notify_rooms(request: Request):
+    """机器人管理页「主播个人配置」卡片数据（仅管理员）：总览页机器人开关
+    已打开的房间列表，带主播头像、通知群号与个人配置三态值 + 默认机器人
+    的全局模板（v2.5.0 透出 join_check / bot_id）。"""
+    check_admin(request)
+    g = _qq_bot_row(1)
+    rows = q("""SELECT n.room_id, n.group_ids, n.template_on, n.template_off,
+                       n.notify_on, n.notify_off, n.report_offline,
+                       n.debounce_offline, n.join_check, n.bot_id,
+                       r.anchor_name, r.avatar_url
+                FROM qq_notify n JOIN rooms r ON r.room_id = n.room_id
+                WHERE n.enabled = 1 AND r.enabled = 1
+                ORDER BY r.anchor_name, n.room_id""")
+    rooms = []
+    for row in rows:
+        try:
+            groups = [int(x) for x in json.loads(row["group_ids"])]
+        except (ValueError, TypeError):
+            groups = []
+        rooms.append({
+            "room_id": int(row["room_id"]),
+            "anchor_name": row["anchor_name"] or "",
+            "avatar_url": row["avatar_url"] or "",
+            "group_ids": groups,
+            "template_on": row["template_on"] or "",
+            "template_off": row["template_off"] or "",
+            "notify_on": None if row["notify_on"] is None else bool(row["notify_on"]),
+            "notify_off": None if row["notify_off"] is None else bool(row["notify_off"]),
+            "report_offline": (None if row["report_offline"] is None
+                               else bool(row["report_offline"])),
+            "debounce_offline": (int(row["debounce_offline"])
+                                 if row["debounce_offline"] is not None else None),
+            "join_check": bool(row["join_check"]),
+            "bot_id": (int(row["bot_id"]) if row["bot_id"] else None),
+        })
+    return {
+        "global": {k: g[k] for k in ("template_on", "template_off", "notify_on",
+                                     "notify_off", "report_offline",
+                                     "debounce_offline")},
+        "rooms": rooms,
+    }
 
 
 # ---------------------------------------------------------------------------

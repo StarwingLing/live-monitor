@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS live_sessions (
     peak_popularity  INTEGER NOT NULL DEFAULT 0, -- 场内最高人气值（加权）
     peak_viewers     INTEGER NOT NULL DEFAULT 0, -- 场内最高房间观众数（真实同接，ONLINE_RANK_COUNT）
     danmaku_count    INTEGER NOT NULL DEFAULT 0, -- 冗余计数，加速列表页
-    gift_value_yuan  REAL NOT NULL DEFAULT 0.0   -- 冗余合计（礼物+SC+舰长）
+    gift_value_yuan  REAL NOT NULL DEFAULT 0.0,  -- 冗余合计（礼物+SC+舰长）
+    cover_url        TEXT NOT NULL DEFAULT ''    -- 开播时直播间封面（v2.5.1 建场写入，
+                                                 -- 与 bili-monitor db.py 锁步）
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_room ON live_sessions(room_id, start_time DESC);
 
@@ -270,6 +272,19 @@ CREATE TABLE IF NOT EXISTS manual_clip_notes (
     updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_manual_clip_notes ON manual_clip_notes(clip_id, id);
+-- v2.3.0 投稿结果落库（replay 专属表）：任务表进程内 2h 过期即失忆，
+-- 前端刷新也丢会话态——成功投稿的切片按 clip_id 恒存，归档接口回传
+-- submission 供「已投稿」徽标持久显示（刷新/重启后仍在）
+CREATE TABLE IF NOT EXISTS clip_submissions (
+    clip_id      INTEGER PRIMARY KEY,           -- 切片 id（与 manual_clips 对应）
+    bv           TEXT NOT NULL DEFAULT '',      -- 新视频 BV 号 / 分P目标稿件号
+    mode         TEXT NOT NULL DEFAULT '',      -- new 新视频 / part 追加分P
+    title        TEXT NOT NULL DEFAULT '',      -- 投稿标题 / 分P名
+    submitted_at TEXT NOT NULL,                 -- 成功时刻（本地 ISO8601）
+    season_note  TEXT NOT NULL DEFAULT '',      -- 加入合集失败等补充说明
+    alive        INTEGER NOT NULL DEFAULT 1,    -- v2.3.0 存在性核验：1 在 / 0 已删（稿件或同名分P消失）
+    checked_at   TEXT NOT NULL DEFAULT ''       -- v2.3.0 最近一次核验时刻
+);
 """
 
 # 舰长等级文案（guard_level: 1总督 2提督 3舰长）
@@ -346,6 +361,11 @@ def init_db(db_path: Path | str | None = None) -> None:
             "ALTER TABLE recordings ADD COLUMN oss_bucket TEXT NOT NULL DEFAULT ''",      # 2026-10-12 v2.1 原片所在桶（'' = 主桶）
             "ALTER TABLE recordings ADD COLUMN oss_low_bucket TEXT NOT NULL DEFAULT ''",  # 2026-10-12 v2.1 low 所在桶（'' = 主桶；新上云恒 mid，不随归档翻回）
             "ALTER TABLE recordings ADD COLUMN restored_at TEXT NOT NULL DEFAULT ''",     # 2026-10-13 v2.2.1 回灌标记（回灌原片独立 24h 本地窗口）
+            # v2.3.0 投稿记录存在性核验（长周期任务更新；alive=0 时胶囊不再显示）
+            "ALTER TABLE clip_submissions ADD COLUMN alive INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE clip_submissions ADD COLUMN checked_at TEXT NOT NULL DEFAULT ''",
+            # v2.5.1 场次封面（建场写入开播时直播间封面；与 bili-monitor db.py 锁步）
+            "ALTER TABLE live_sessions ADD COLUMN cover_url TEXT NOT NULL DEFAULT ''",
         ]
         for ddl in _MIGRATIONS:
             try:

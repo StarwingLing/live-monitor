@@ -69,6 +69,9 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "biliup_bin": "",                          # 空 = 投稿功能未部署（禁用）
         "biliup_cookies": "data/biliup-cookies.json",
         "biliup_timeout_sec": 1800,                # 上传超时（3Mbps 上行按文件大小放宽）
+        # v2.3.0 本地投稿器认领窗口（秒）：part 任务 pending 等待本地投稿器
+        # 认领；超时未认领由服务器兜底执行（3Mbps 慢路径）
+        "submit_worker_wait_sec": 25,
     },
     "capture": {
         "poll_interval_sec": 120,
@@ -121,18 +124,28 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "restore_keep_hours": 24,
         "rec_archive_after_days": 10,  # 录播原片 mid 热窗口天数，到期归档主桶(IA)
         "scan_interval_sec": 600,   # 转码+上云线程扫描周期
+        # v2.3.0 管线闸门：本地调试/只读 OSS 场景置 false——转码+上云+归档+
+        # 释放管线涉及真实云端对象与本地文件删除，绝不该在测试机上自动跑
+        "pipeline_enabled": True,
     },
     # 录制功能总配置（整场录制 / 直播截取 / 手动切片 / v2.1 分段轮换+桥接）。
     "recording": {
         # 功能总开关：false 时录制接口直接拒绝（本地开发未装 ffmpeg 可置 false）
         "enabled": True,
-        # 按钮页整场录制画质（qn 是请求上限，主播无 4K 推流时自动落到
-        # 实际最高档。真 4K 推流码率可达 8~15Mbps，磁盘水位兜底会提前删最旧）
-        "full_qn": 200,
-        # 自动全程录制画质（1080P60 档）
-        "auto_full_qn": 150,
+        # 按钮页整场录制画质。v2.4.0 起定 10000=原画（旧值 200）：实测
+        # B 站晚间对「原画以下档位」的请求限档（qn=150/400 只能拿到 720p
+        # 的 250 档），显式请求原画（qn=10000）在登录态有效时稳定发放
+        # 原画（2026-10-19 qn 矩阵实测）。原画=主播推流源画质（无 4K 推流
+        # 即 1080P，码率与旧档最高档一致）
+        "full_qn": 10000,
+        # 自动全程录制画质（v2.4.0 起同样定 10000=原画，原因见 full_qn）
+        "auto_full_qn": 10000,
         # 自动全程录制对账轮询间隔（秒）：开播头最多缺 ~35s
         "auto_full_poll_sec": 30,
+        # v2.3.1：连续起流失败的退避期（秒）——本房最近两条 auto 行均
+        # failed 时，该秒数内不再排队新行（延迟直播等持续拉不到流的
+        # 场景降频重试，防 failed 行刷屏归档列表）；0 = 关闭退避
+        "auto_full_retry_backoff_sec": 300,
         # 全局并发整场录制上限（手动 + 自动共用）
         "max_concurrent": 2,
         # ffmpeg 分段时长（秒）

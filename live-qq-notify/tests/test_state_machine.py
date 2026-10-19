@@ -137,5 +137,27 @@ check("开播模板不含 {cover}:不带图", "[CQ:" not in t)
 t = decide.online_text("📺 {uname} 开播了 {cover}", "阿A", "晚", 123, "")
 check("模板含 {cover} 但无封面 URL:渲染为空", t == "📺 阿A 开播了 ")
 
+# ---- room_effective:房间个人配置与全局合并(v0.3.0) ----
+G = {"notify_on": True, "notify_off": True, "report_offline": False,
+     "debounce_offline": 300}
+check("合并-全 None 跟随全局", decide.room_effective(
+    {"notify_on": None, "notify_off": None, "report_offline": None,
+     "debounce_offline": None}, G)
+    == {"notify_on": True, "notify_off": True, "report_offline": False,
+        "debounce_offline": 300})
+check("合并-覆盖值优先", decide.room_effective(
+    {"notify_on": False, "notify_off": True, "report_offline": True,
+     "debounce_offline": 60}, G)
+    == {"notify_on": False, "notify_off": True, "report_offline": True,
+        "debounce_offline": 60})
+check("合并-混合(部分覆盖部分跟随)", decide.room_effective(
+    {"notify_on": None, "notify_off": False, "report_offline": None,
+     "debounce_offline": 0}, G)
+    == {"notify_on": True, "notify_off": False, "report_offline": False,
+        "debounce_offline": 0})
+check("合并-全局缺键回退默认(防抖 300)", decide.room_effective(
+    {"notify_on": None, "notify_off": None, "report_offline": None,
+     "debounce_offline": None}, {})["debounce_offline"] == 300)
+
 print("\n汇总:", "全部通过" if all(results) else f"{results.count(False)} 项失败")
 raise SystemExit(0 if all(results) else 1)

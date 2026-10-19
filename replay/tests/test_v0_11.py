@@ -77,6 +77,9 @@ import replay.capture.manager as mgr_mod
 from replay.config import get_config
 
 get_config()["recording"]["auto_full_qn"] = 150
+# 存量缺陷修复（v2.3.0 顺带）：本地 config.toml 自 v2.2.5 起 recording
+# .enabled=false，对账不插行——测试须自带开关状态，不随本地配置漂移
+get_config()["recording"]["enabled"] = True
 db = Db()
 
 LIVE = {"live": True}

@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS live_sessions (
     peak_popularity  INTEGER NOT NULL DEFAULT 0, -- 场内最高人气值（加权）
     peak_viewers     INTEGER NOT NULL DEFAULT 0, -- 场内最高房间观众数（真实同接，ONLINE_RANK_COUNT）
     danmaku_count    INTEGER NOT NULL DEFAULT 0, -- 冗余计数，加速列表页
-    gift_value_yuan  REAL NOT NULL DEFAULT 0.0   -- 冗余合计（礼物+SC+舰长）
+    gift_value_yuan  REAL NOT NULL DEFAULT 0.0,  -- 冗余合计（礼物+SC+舰长）
+    cover_url        TEXT NOT NULL DEFAULT ''    -- 开播时直播间封面（v2.5.1，采集端建场写入；
+                                                 -- 旧场次为空 → 前端占位图）
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_room ON live_sessions(room_id, start_time DESC);
 
@@ -224,6 +226,15 @@ CREATE TABLE IF NOT EXISTS qq_notify (
                                                   -- qq_group_map 换 openid）
     template_on  TEXT    NOT NULL DEFAULT '',    -- 房间专属开播文案（空=用全局）
     template_off TEXT    NOT NULL DEFAULT '',    -- 房间专属下播文案（空=用全局）
+    -- v2.4.0 房间级个人配置（机器人管理页主播卡片；NULL=跟随全局，属主
+    -- live-qq-notify，锁步；生效合并 decide.room_effective）
+    notify_on        INTEGER,                    -- 开播通知覆盖（0/1）
+    notify_off       INTEGER,                    -- 下播通知覆盖（0/1）
+    report_offline   INTEGER,                    -- 下播报告图覆盖（0/1）
+    debounce_offline INTEGER,                    -- 下播防抖覆盖（秒）
+    -- v2.5.0 多机器人 + 入群核查（属主 live-qq-notify，锁步）
+    bot_id        INTEGER,                       -- 房间归属机器人（NULL=默认机器人1）
+    join_check    INTEGER NOT NULL DEFAULT 0,    -- 入群申请核查开关（0/1；事件中枢消费）
     updated_at   TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
@@ -243,8 +254,21 @@ CREATE TABLE IF NOT EXISTS qq_notify_global (
     command_replies  TEXT    NOT NULL DEFAULT '{}', -- 群指令自动回复表 JSON dict
                                                     -- （v2.3.1；管理页键值对编辑，
                                                     -- 事件中枢消费；空={}回退代码默认）
+    -- v2.5.0 AI 智能回复（事件中枢消费：指令未命中时 LLM 兜底；空串=内置默认，
+    -- 属主 live-qq-notify，锁步）。base/model 空 = 智谱标准 API + glm-4.5-flash
+    ai_reply_enabled INTEGER NOT NULL DEFAULT 0,    -- 0=关 1=开（@未命中指令时）
+    ai_api_key       TEXT    NOT NULL DEFAULT '',   -- LLM API Key（Bearer 鉴权）
+    ai_base_url      TEXT    NOT NULL DEFAULT '',   -- OpenAI 兼容基址（空=默认）
+    ai_model         TEXT    NOT NULL DEFAULT '',   -- 模型名（空=默认）
+    ai_system_prompt TEXT    NOT NULL DEFAULT '',   -- 人设提示词（空=内置默认）
+    -- v2.5.0 AI 频控（页面可调；空/脏时消费方回退代码默认 3 次/300s）
+    ai_rate_limit     INTEGER NOT NULL DEFAULT 3,    -- 每群每窗口最多次数
+    ai_rate_window    INTEGER NOT NULL DEFAULT 300,  -- 频控窗口（秒）
     notify_on        INTEGER NOT NULL DEFAULT 1,   -- 全局开播通知（默认开）
     notify_off       INTEGER NOT NULL DEFAULT 1,   -- 全局下播通知（默认开）
+    report_offline   INTEGER NOT NULL DEFAULT 0,   -- 下播报告图（下播文本后紧随发
+                                                   -- 本场报告图，默认关；属主
+                                                   -- live-qq-notify，锁步）
     notify_cover     INTEGER NOT NULL DEFAULT 1,   -- 【停用 2026-10-14】封面改纯
                                                    -- 模板变量 {cover}，列仅兼容保留
     template_on      TEXT    NOT NULL DEFAULT '📺 {uname} 开播了:{title}\n{url}\n{cover}',
@@ -257,10 +281,48 @@ INSERT OR IGNORE INTO qq_notify_global (id) VALUES (1);
 -- 群号→openid 映射（v2.3.1 官方通道）：openid 是"机器人×群"维度标识，官方
 -- 接口不提供群号反查，只能从机器人事件捕获——管理页「群映射获取」发起绑定
 -- 会话（WebSocket 监听 GROUP_ADD_ROBOT/@消息）写入本表；通知器发送前查表转换。
+-- v2.5.0 复合主键 (bot_id, group_id)：同一群在不同机器人下 openid 不同、允许
+-- 并存；存量表由 init_db 内 _rebuild_group_map_v25 迁移（SQLite 不能改主键）。
 CREATE TABLE IF NOT EXISTS qq_group_map (
-    group_id     INTEGER PRIMARY KEY,      -- QQ 群号（绑定会话锚定的用户输入）
-    group_openid TEXT NOT NULL,            -- 官方通道群标识（32 位十六进制串）
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    bot_id       INTEGER NOT NULL DEFAULT 1,  -- 归属机器人（v2.5.0 多机器人）
+    group_id     INTEGER NOT NULL,            -- QQ 群号（绑定会话锚定的用户输入）
+    group_openid TEXT NOT NULL,               -- 官方通道群标识（32 位十六进制串）
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    remark       TEXT NOT NULL DEFAULT '',    -- 备注（v2.4.1 管理页行内编辑；重新绑定的 upsert 不触碰本列）
+    PRIMARY KEY (bot_id, group_id)
+);
+
+-- 机器人档案（v2.5.0 多机器人，属主 live-qq-notify，锁步）：每行一个机器人，
+-- 承载原 qq_notify_global 的全部配置字段 + 显示名；本页全部板块按选中机器人
+-- 编辑，事件中枢为每个 official 机器人各持一条 WebSocket。迁移把
+-- qq_notify_global 现值种子为机器人 1；旧表保留冻结（回滚保险，不再读写）。
+CREATE TABLE IF NOT EXISTS qq_bots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL DEFAULT '',
+    channel          TEXT    NOT NULL DEFAULT 'napcat',
+    qq_account       TEXT    NOT NULL DEFAULT '',
+    onebot_url       TEXT    NOT NULL DEFAULT 'http://127.0.0.1:3000',
+    onebot_token     TEXT    NOT NULL DEFAULT '',
+    webui_url        TEXT    NOT NULL DEFAULT 'http://127.0.0.1:6099',
+    webui_token      TEXT    NOT NULL DEFAULT '',
+    official_app_id  TEXT    NOT NULL DEFAULT '',
+    official_app_secret TEXT NOT NULL DEFAULT '',
+    command_replies  TEXT    NOT NULL DEFAULT '{}',
+    notify_on        INTEGER NOT NULL DEFAULT 1,
+    notify_off       INTEGER NOT NULL DEFAULT 1,
+    report_offline   INTEGER NOT NULL DEFAULT 0,
+    template_on      TEXT    NOT NULL DEFAULT '📺 {uname} 开播了:{title}\n{url}\n{cover}',
+    template_off     TEXT    NOT NULL DEFAULT '🌙 {uname} 下播了\n⏱ 本次直播:{duration}',
+    debounce_offline INTEGER NOT NULL DEFAULT 300,
+    ai_reply_enabled INTEGER NOT NULL DEFAULT 0,
+    ai_api_key       TEXT    NOT NULL DEFAULT '',
+    ai_base_url      TEXT    NOT NULL DEFAULT '',
+    ai_model         TEXT    NOT NULL DEFAULT '',
+    ai_system_prompt TEXT    NOT NULL DEFAULT '',
+    ai_rate_limit    INTEGER NOT NULL DEFAULT 3,
+    ai_rate_window   INTEGER NOT NULL DEFAULT 300,
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at       TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 """
@@ -292,11 +354,32 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _with_lock_retry(fn, conn: sqlite3.Connection,
+                     tries: int = 10, gap: float = 3.0) -> None:
+    """DDL/写迁移退避重试(2026-10-18 服务器部署实测,与 live-qq-notify
+    store.py 锁步同款):共享库由 replay-capture 每秒高频写,SCHEMA/表重建/
+    种子 INSERT 偶发撞写锁(实测一次撞锁 8s+ 后恢复瞬时)——busy_timeout
+    只挡得住短事务;长占用下退避重试比一次性失败退出稳。仅对 "locked"
+    重试,其他错误原样抛出。
+    """
+    last: sqlite3.OperationalError | None = None
+    for _ in range(tries):
+        try:
+            fn()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e):
+                raise
+            last = e
+            time.sleep(gap)
+    raise last  # type: ignore[misc]
+
+
 def init_db(db_path: Path | str | None = None) -> None:
     """建表（幂等）+ 轻量迁移。capture 与 web 启动时都会调用一次。"""
     conn = connect(db_path)
     try:
-        conn.executescript(SCHEMA)
+        _with_lock_retry(lambda: conn.executescript(SCHEMA), conn)
         # 迁移：旧库补列（新列加入时间见注释；列已存在时报错忽略）
         _MIGRATIONS = [
             "ALTER TABLE anchor_snapshots ADD COLUMN watched INTEGER NOT NULL DEFAULT 0",  # 2026-09-12
@@ -326,6 +409,26 @@ def init_db(db_path: Path | str | None = None) -> None:
             "ALTER TABLE qq_notify_global ADD COLUMN official_app_id TEXT NOT NULL DEFAULT ''",                 # 2026-10-17 v2.3.1 官方机器人 AppID
             "ALTER TABLE qq_notify_global ADD COLUMN official_app_secret TEXT NOT NULL DEFAULT ''",             # 2026-10-17 v2.3.1 官方机器人 AppSecret
             "ALTER TABLE qq_notify_global ADD COLUMN command_replies TEXT NOT NULL DEFAULT '{}'",              # 2026-10-17 v2.3.1 群指令自动回复表（属主 live-qq-notify，锁步）
+            "ALTER TABLE qq_notify_global ADD COLUMN report_offline INTEGER NOT NULL DEFAULT 0",                # 下播报告图开关（属主 live-qq-notify，锁步）
+            "ALTER TABLE qq_notify ADD COLUMN notify_on INTEGER",                                              # v2.4.0 房间级个人配置四列（NULL=跟随全局；属主 live-qq-notify，锁步）
+        "ALTER TABLE qq_notify ADD COLUMN notify_off INTEGER",
+        "ALTER TABLE qq_notify ADD COLUMN report_offline INTEGER",
+        "ALTER TABLE qq_notify ADD COLUMN debounce_offline INTEGER",
+        "ALTER TABLE qq_group_map ADD COLUMN remark TEXT NOT NULL DEFAULT ''",    # v2.4.1 群备注（管理页群映射行内编辑；属主 live-qq-notify，锁步）
+            # v2.5.0 AI 智能回复五列（事件中枢指令未命中 LLM 兜底；属主 live-qq-notify，锁步）
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_reply_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_api_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_base_url TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_model TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_system_prompt TEXT NOT NULL DEFAULT ''",
+            # v2.5.0 AI 频控两列（页面可调，2026-10-18 用户定稿从代码常量升级为配置项）
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_rate_limit INTEGER NOT NULL DEFAULT 3",
+            "ALTER TABLE qq_notify_global ADD COLUMN ai_rate_window INTEGER NOT NULL DEFAULT 300",
+            # v2.5.0 多机器人 + 入群核查（qq_group_map 的 bot_id 由表重建迁移，不在此 ALTER）
+            "ALTER TABLE qq_notify ADD COLUMN bot_id INTEGER",
+            "ALTER TABLE qq_notify ADD COLUMN join_check INTEGER NOT NULL DEFAULT 0",
+            # v2.5.1 场次封面（采集端建场写入，历史场次为空 → 前端占位图；与 replay/db.py 锁步）
+            "ALTER TABLE live_sessions ADD COLUMN cover_url TEXT NOT NULL DEFAULT ''",
             # 空 = 存量行（分段信息已丢失），API 走单 run 近似并标 approx
             # v0.11 自动全程录制 + 手动切片
             # 签名/删除按行分派桶（'' = 主桶，兼容存量行与归档后的语义）
@@ -336,8 +439,75 @@ def init_db(db_path: Path | str | None = None) -> None:
             except sqlite3.OperationalError:
                 pass  # 列已存在
         conn.commit()
+        _with_lock_retry(lambda: _rebuild_group_map_v25(conn), conn)
+        _with_lock_retry(lambda: _seed_bots_v25(conn), conn)
     finally:
         conn.close()
+
+
+def _rebuild_group_map_v25(conn: sqlite3.Connection) -> None:
+    """旧版 qq_group_map（单列主键 group_id）→ v2.5.0 复合主键 (bot_id, group_id)。
+
+    与 live-qq-notify store._rebuild_group_map 同款迁移（两侧锁步）：建新表
+    →搬数据（存量行归机器人 1）→换名；已是新结构（有 bot_id 列）跳过。
+    """
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(qq_group_map)")]
+    except sqlite3.OperationalError:
+        # 中途失败自愈:qq_group_map 已 DROP 而 v25 新表还在 → 补完换名
+        try:
+            conn.execute("ALTER TABLE qq_group_map_v25 RENAME TO qq_group_map")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        return
+    if not cols or "bot_id" in cols:
+        return
+    conn.executescript("""
+        CREATE TABLE qq_group_map_v25 (
+            bot_id       INTEGER NOT NULL DEFAULT 1,
+            group_id     INTEGER NOT NULL,
+            group_openid TEXT NOT NULL,
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            remark       TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (bot_id, group_id));
+        INSERT INTO qq_group_map_v25 (group_id, group_openid, updated_at, remark)
+            SELECT group_id, group_openid, updated_at, remark FROM qq_group_map;
+        DROP TABLE qq_group_map;
+        ALTER TABLE qq_group_map_v25 RENAME TO qq_group_map;
+    """)
+    conn.commit()
+
+
+def _seed_bots_v25(conn: sqlite3.Connection) -> None:
+    """qq_bots 空表时把 qq_notify_global 现值种子为机器人 1（幂等；锁步同款）。
+
+    v2.5.0 起 qq_notify_global 冻结不再读写（保留表作回滚保险）。
+    """
+    if conn.execute("SELECT 1 FROM qq_bots LIMIT 1").fetchone():
+        return
+    conn.execute("""
+        INSERT INTO qq_bots (id, name, channel, qq_account, onebot_url,
+            onebot_token, webui_url, webui_token, official_app_id,
+            official_app_secret, command_replies, notify_on, notify_off,
+            report_offline, template_on, template_off, debounce_offline,
+            ai_reply_enabled, ai_api_key, ai_base_url, ai_model,
+            ai_system_prompt, ai_rate_limit, ai_rate_window)
+        SELECT 1, '默认机器人', COALESCE(channel,'napcat'), COALESCE(qq_account,''),
+            COALESCE(onebot_url,'http://127.0.0.1:3000'), COALESCE(onebot_token,''),
+            COALESCE(webui_url,'http://127.0.0.1:6099'), COALESCE(webui_token,''),
+            COALESCE(official_app_id,''), COALESCE(official_app_secret,''),
+            COALESCE(command_replies,'{}'), COALESCE(notify_on,1),
+            COALESCE(notify_off,1), COALESCE(report_offline,0),
+            COALESCE(template_on,''), COALESCE(template_off,''),
+            COALESCE(debounce_offline,300),
+            COALESCE(ai_reply_enabled,0), COALESCE(ai_api_key,''),
+            COALESCE(ai_base_url,''), COALESCE(ai_model,''),
+            COALESCE(ai_system_prompt,''), COALESCE(ai_rate_limit,3),
+            COALESCE(ai_rate_window,300)
+        FROM qq_notify_global WHERE id = 1
+    """)
+    conn.commit()
 
 
 class Db:

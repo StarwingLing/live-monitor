@@ -23,6 +23,7 @@ bili_cookie_name = "bili_auth"
 biliup_bin = ""                              # 空 = 投稿功能未部署（禁用）
 biliup_cookies = "data/biliup-cookies.json"
 biliup_timeout_sec = 1800
+submit_worker_wait_sec = 25                  # 本地投稿器认领窗口（秒），超时服务器兜底
 
 [capture]
 # 采集进程参数（replay-capture 服务消费；完整键表与默认值见 replay/config.py）
@@ -57,13 +58,15 @@ clips_keep_hours = 120         # 切片本体留存（服务器配 0）
 clips_low_keep_hours = 720     # 切片低清预览留存（服务器配 0）
 rec_archive_after_days = 10    # 录播原片 mid 热窗口天数，到期归档主桶(IA)
 scan_interval_sec = 600        # 转码+上云管线扫描周期（秒）
+pipeline_enabled = true        # 管线线程闸门（v2.3.0）；本地只读 OSS 调试置 false
 
 [recording]
 # 录制/切片/分段轮换参数（完整键表见 replay/config.py）
 enabled = true                 # 录制总开关（本地未装 ffmpeg 可置 false）
-full_qn = 200                  # 手动整场录制画质
-auto_full_qn = 150             # 自动全程录制画质
+full_qn = 10000                 # v2.4.0：手动整场录制画质（10000=原画，晚间档位限档实测）
+auto_full_qn = 10000            # v2.4.0：自动全程录制画质（10000=原画，同上）
 auto_full_poll_sec = 30        # 自动全程对账间隔（秒）
+auto_full_retry_backoff_sec = 300  # v2.3.1：连续起流失败退避期（秒，0=关）
 max_concurrent = 2             # 全局并发整场上限
 segment_sec = 10               # ffmpeg 分段时长（秒）
 # v2.2.3：full_retention_days / max_total_full_gb（保留期/总量水位自动删行）

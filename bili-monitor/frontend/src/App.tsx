@@ -8,6 +8,7 @@ const Index = lazy(() => import("./pages/Index"));
 const Room = lazy(() => import("./pages/Room"));
 const Analysis = lazy(() => import("./pages/Analysis"));
 const Manage = lazy(() => import("./pages/Manage"));
+const BotManage = lazy(() => import("./pages/BotManage"));
 
 function Loading() {
   return (
@@ -46,6 +47,9 @@ function Nav() {
             {admin && (
               <NavLink to="/manage" className={({ isActive }) => isActive ? "active" : ""}>直播间管理</NavLink>
             )}
+            {admin && (
+              <NavLink to="/bot" className={({ isActive }) => isActive ? "active" : ""}>机器人管理</NavLink>
+            )}
           </div>
           <div className="right">
             <div className="status"><span className="dot" />运行中</div>
@@ -77,6 +81,7 @@ export default function App() {
           <Route path="/session/:roomId/:sessionId" element={<Room />} />
           <Route path="/analysis" element={<Analysis />} />
           <Route path="/manage" element={<Manage />} />
+          <Route path="/bot" element={<BotManage />} />
           <Route path="*" element={<div className="empty">页面不存在 · <Link to="/">回总览</Link></div>} />
         </Route>
       </Routes>
